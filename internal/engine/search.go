@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -80,25 +81,13 @@ func (e *Engine) Search(ctx context.Context, req SearchRequest) ([]Hit, error) {
 		return nil, fmt.Errorf("embed query: got %d vectors", len(vecs))
 	}
 
-	e.storeMu.RLock()
-	defer e.storeMu.RUnlock()
-	if e.store == nil {
-		return nil, fmt.Errorf("%w: %v", ErrReindexRequired, e.storeErr)
-	}
-	q := store.Query{Vec: vecs[0], K: min(4*req.K, 10*MaxK), Kinds: req.Kinds}
-	if len(req.Roots) > 0 {
-		q.Accept = func(id uint64) bool {
-			f, ok := e.cat.Get(id)
-			return ok && slices.ContainsFunc(req.Roots, func(r string) bool { return config.Within(r, f.Path) })
-		}
-	}
-	raw, err := e.store.Search(q)
+	raw, err := e.searchStore(store.Query{Vec: vecs[0], K: min(4*req.K, 10*MaxK), Kinds: req.Kinds}, req.Roots)
 	if err != nil {
 		return nil, err
 	}
-	texts := map[string]string{} // extracted text per path (and page), for snippets
-	seen := map[uint64]bool{}
 	var hits []Hit
+	var files []catalog.File
+	seen := map[uint64]bool{}
 	for _, h := range raw {
 		if seen[h.FileID] {
 			continue
@@ -108,14 +97,56 @@ func (e *Engine) Search(ctx context.Context, req SearchRequest) ([]Hit, error) {
 			continue // replaced or removed since the store was read
 		}
 		seen[h.FileID] = true
-		hit := Hit{Path: f.Path, Kind: h.Kind.String(), Locator: h.Loc, Score: h.Score}
-		hit.Snippet, hit.Stale = e.snippet(ctx, f, h.Loc, texts)
-		hits = append(hits, hit)
+		hits = append(hits, Hit{Path: f.Path, Kind: h.Kind.String(), Locator: h.Loc, Score: h.Score})
+		files = append(files, f)
 		if len(hits) == req.K {
 			break
 		}
 	}
+
+	// Snippets are read live, and a PDF's from the embedder, which during
+	// indexing finishes its current job first: give them all a budget, and
+	// send the hits past it without one rather than keep the search waiting.
+	sctx, cancel := context.WithTimeout(ctx, snippetBudget)
+	defer cancel()
+	texts := map[string]string{} // extracted text per path (and page)
+	for i, f := range files {
+		if err := ctx.Err(); err != nil {
+			return nil, err // the client is gone
+		}
+		if sctx.Err() != nil {
+			hits[i].Stale = stale(f)
+			continue
+		}
+		hits[i].Snippet, hits[i].Stale = e.snippet(sctx, f, hits[i].Locator, texts)
+	}
 	return hits, nil
+}
+
+// snippetBudget bounds the time one search spends on its snippets.
+var snippetBudget = 2 * time.Second
+
+// searchStore runs q on the vector store, holding it only as long as that:
+// indexing waits for it to write.
+func (e *Engine) searchStore(q store.Query, roots []string) ([]store.Hit, error) {
+	e.storeMu.RLock()
+	defer e.storeMu.RUnlock()
+	if e.store == nil {
+		return nil, fmt.Errorf("%w: %v", ErrReindexRequired, e.storeErr)
+	}
+	if len(roots) > 0 {
+		q.Accept = func(id uint64) bool {
+			f, ok := e.cat.Get(id)
+			return ok && slices.ContainsFunc(roots, func(r string) bool { return config.Within(r, f.Path) })
+		}
+	}
+	return e.store.Search(q)
+}
+
+// stale reports whether f changed on disk since it was indexed.
+func stale(f catalog.File) bool {
+	fi, err := os.Stat(f.Path)
+	return err != nil || fi.Size() != f.Size || fi.ModTime().UnixNano() != f.MTime
 }
 
 // snippet reads the fragment live from disk. stale is true when the file no

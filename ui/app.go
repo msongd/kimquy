@@ -120,6 +120,7 @@ type app struct {
 	due       time.Time // when to search for query; zero when none is due
 	seq       int       // of the latest search; older replies are dropped
 	searching bool
+	stop      context.CancelFunc // ends the search in flight; nil when none
 	hits      []client.Hit
 	took      int64
 	searchErr string
@@ -382,37 +383,49 @@ func (a *app) streamEvents(ctx context.Context, post func(func())) {
 	}
 }
 
+// queryChanged drops the results, which no longer answer the query, and
+// searches again after the typing pause.
 func (a *app) queryChanged(now time.Time) {
+	a.dropSearch()
 	if strings.TrimSpace(a.query) == "" {
-		a.seq++ // drop a search in flight
-		a.due, a.hits, a.searching, a.searchErr = time.Time{}, nil, false, ""
+		a.due = time.Time{}
 		return
 	}
 	a.due = now.Add(debounce)
+}
+
+// dropSearch ends the search in flight, if any, and clears the results.
+func (a *app) dropSearch() {
+	a.seq++ // its reply is ignored
+	if a.stop != nil {
+		a.stop() // and semd stops working on it
+		a.stop = nil
+	}
+	a.hits, a.took, a.searching, a.searchErr = nil, 0, false, ""
 }
 
 func (a *app) search(q string) {
 	if q == "" {
 		return
 	}
-	a.seq++
+	a.dropSearch()
 	seq := a.seq
 	req := a.searchRequest(q)
-	a.searching = true
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	a.searching, a.stop = true, cancel
 	a.async(func() func() {
-		ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
-		defer cancel()
 		res, err := a.be.Search(ctx, req)
 		return func() {
+			cancel()
 			if seq != a.seq {
 				return // superseded
 			}
-			a.searching = false
+			a.searching, a.stop = false, nil
 			if err != nil {
 				a.searchErr = "Search failed: " + err.Error()
 				return
 			}
-			a.searchErr, a.hits, a.took = "", res.Hits, res.TookMS
+			a.hits, a.took = res.Hits, res.TookMS
 			a.choose(0)
 		}
 	})

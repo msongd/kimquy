@@ -26,6 +26,8 @@ type fakeSemd struct {
 	hits     map[string][]client.Hit // by query
 	searches []string
 	reqs     []client.SearchRequest
+	ctxs     []context.Context // of the searches
+	fail     error             // the next search fails with it
 	status   client.Status
 	statuses int // Status calls
 	// stream answers Events (from another goroutine); nil fails it.
@@ -40,9 +42,14 @@ type fakeSemd struct {
 	reindex  int
 }
 
-func (f *fakeSemd) Search(_ context.Context, r client.SearchRequest) (client.SearchResponse, error) {
+func (f *fakeSemd) Search(ctx context.Context, r client.SearchRequest) (client.SearchResponse, error) {
 	f.searches = append(f.searches, r.Q)
 	f.reqs = append(f.reqs, r)
+	f.ctxs = append(f.ctxs, ctx)
+	if err := f.fail; err != nil {
+		f.fail = nil
+		return client.SearchResponse{}, err
+	}
 	return client.SearchResponse{Hits: f.hits[r.Q], TookMS: 7}, f.down
 }
 func (f *fakeSemd) Status(context.Context) (client.Status, error) {
@@ -267,6 +274,49 @@ func TestStaleReplyDropped(t *testing.T) {
 	h.want("report.pdf")
 	if h.HasText("keynote.m4a  (changed since indexed)") {
 		t.Fatal("stale reply shown")
+	}
+}
+
+// Results that no longer answer the query never stay on screen: typing
+// clears them and stops the search in flight, and so does a failure.
+func TestNewQueryClearsResults(t *testing.T) {
+	h := newHarness(t)
+	h.semd.hits["revenue"] = []client.Hit{pdfHit}
+	h.Type("revenue")
+	h.Advance(debounce)
+	h.flush()
+	h.want("report.pdf")
+
+	h.Type(" 2026")
+	h.Frame()
+	if h.HasText("report.pdf") || h.HasText("1 results in 7 ms") {
+		t.Fatal("old results shown for a new query")
+	}
+	h.want("Searching…")
+
+	// A slow search is stopped when the query changes again.
+	h.Advance(debounce)
+	h.Frame()
+	if len(h.queue) == 0 {
+		t.Fatal("no search started")
+	}
+	h.Type("!")
+	h.Frame()
+	h.flush() // the stopped search runs: its context is done
+	if q := h.semd.searches; len(q) != 2 || q[1] != "revenue 2026" || h.semd.ctxs[1].Err() == nil {
+		t.Fatalf("searches %q; the stopped one was not stopped", q)
+	}
+	h.want("Searching…") // its reply did not count
+
+	h.Advance(debounce)
+	h.flush()
+	h.semd.hits["revenue 2026!"] = []client.Hit{pdfHit}
+	h.semd.fail = errors.New("semd unreachable: context deadline exceeded")
+	h.a.search("revenue 2026!")
+	h.flush()
+	h.want("Search failed: semd unreachable: context deadline exceeded")
+	if h.HasText("report.pdf") {
+		t.Fatal("results shown beside a failed search")
 	}
 }
 
