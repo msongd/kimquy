@@ -41,7 +41,22 @@ import (
 // desktop is the shell of the running app.
 type desktop struct{ win **mygo.Window }
 
-func (d desktop) HideWindow() { (*d.win).Hide() }
+func (d desktop) HideWindow() { hideWindow(*d.win) }
+
+// showWindow and hideWindow keep the Dock icon in step with the window: while
+// it is hidden only the menu-bar icon shows. An accessory app is not brought
+// to the front by showing a window, hence App.Focus.
+func showWindow(w *mygo.Window) {
+	mygo.App.Dock.Show()
+	w.Show()
+	w.Focus()
+	mygo.App.Focus()
+}
+
+func hideWindow(w *mygo.Window) {
+	w.Hide()
+	mygo.App.Dock.Hide()
+}
 
 func (desktop) Quit() { mygo.App.Quit() }
 
@@ -162,8 +177,7 @@ func main() {
 		})
 	}
 	show := func() {
-		win.Show()
-		win.Focus()
+		showWindow(win)
 		a.input.Focus()
 	}
 	mygo.App.OnSecondInstance(func([]string, string) { show() })
@@ -174,13 +188,17 @@ func main() {
 	})
 	mygo.App.OnWindowAllClosed(func() {}) // the menu bar keeps it running
 	mygo.App.WhenReady(func() {
+		atLogin := mygo.App.WasOpenedAtLogin()
+		if atLogin {
+			mygo.App.Dock.Hide() // the window starts hidden
+		}
 		win = mygo.NewWindow(mygo.WindowOptions{
 			Title:     "Kim Quy",
 			Width:     760,
 			Height:    520,
 			MinWidth:  minWindowW, // the settings sheet fits, unscrolled
 			MinHeight: minWindowH,
-			Hidden:    mygo.App.WasOpenedAtLogin(),
+			Hidden:    atLogin,
 			Content:   ui.View(a.view),
 		})
 		// Hide rather than close: the window comes back as it was. Quit
@@ -193,7 +211,7 @@ func main() {
 				return
 			}
 			e.PreventDefault()
-			win.Hide()
+			hideWindow(win)
 		})
 		close(ready)
 		// A hidden window draws no frames, so its view polls nothing: keep
@@ -209,7 +227,7 @@ func main() {
 		}()
 		toggle := func() {
 			if win.IsVisible() && win.IsFocused() {
-				win.Hide()
+				hideWindow(win)
 			} else {
 				show()
 			}
