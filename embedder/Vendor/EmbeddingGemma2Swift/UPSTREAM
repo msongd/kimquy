@@ -1,0 +1,6 @@
+Vendored from https://github.com/Obscyra-app/EmbeddingGemma2Swift
+Commit: 2c7815f (v0.1.0, "Release native EmbeddingGemma 2 MLX Swift runtime v0.1.0")
+Copied: Sources/EmbeddingGemma2, Tests, license and notice files, VALIDATION.md.
+Local changes: none. Record any change here with its reason.
+Weights: huggingface.co/Nurymanau/EmbeddingGemma-2-MLX-Swift @ 06b4e075e6b3772e3c29df9f2a2ace7bd4950bdd
+2c7815fc9e2f6d99df05b3cd259f6086ed65e9cc

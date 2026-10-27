@@ -1,0 +1,21 @@
+# Build outputs
+/bin/
+/packaging/out/
+/embedder/.build/
+/embedder/.build-xcode/
+/embedder/.swiftpm/
+/ui/ui
+*.test
+*.iconset/
+
+# Model weights: downloaded by the app, never committed
+/models/
+
+# A one-off migration for the developer's own install (SemSearch → Kim Quy)
+/packaging/migrate-from-semsearch.sh
+
+# macOS and editors
+.DS_Store
+.idea/
+.vscode/
+*.swp

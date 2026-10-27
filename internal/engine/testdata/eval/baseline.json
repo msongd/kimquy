@@ -1,0 +1,35 @@
+{
+  "model": "embeddinggemma-2/eb8a067456a3+v9b18ee382729+aa163c6dc2e47",
+  "groups": {
+    "all": {
+      "n": 84,
+      "top1": 0.952,
+      "recall5": 1,
+      "mrr10": 0.968
+    },
+    "image": {
+      "n": 20,
+      "top1": 1,
+      "recall5": 1,
+      "mrr10": 1
+    },
+    "non-en": {
+      "n": 6,
+      "top1": 1,
+      "recall5": 1,
+      "mrr10": 1
+    },
+    "pdf": {
+      "n": 20,
+      "top1": 0.95,
+      "recall5": 1,
+      "mrr10": 0.96
+    },
+    "text": {
+      "n": 44,
+      "top1": 0.932,
+      "recall5": 1,
+      "mrr10": 0.956
+    }
+  }
+}
