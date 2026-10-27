@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/msongd/kimquy/internal/events"
 	"github.com/msongd/kimquy/internal/kind"
@@ -69,10 +70,20 @@ type Status struct {
 	Scanning   bool         `json:"scanning"`
 	Watch      string       `json:"watch"`
 	Paused     []string     `json:"paused,omitempty"`
+	Working    []Job        `json:"working"`
 	Embedder   EmbedStatus  `json:"embedder"`
 	Store      *StoreStats  `json:"store,omitempty"`
 	StoreError string       `json:"store_error,omitempty"`
 	Roots      []RootStatus `json:"roots"`
+}
+
+// Job is a file semd is processing.
+type Job struct {
+	Path     string    `json:"path"`
+	Started  time.Time `json:"started"`
+	ElapsedS int64     `json:"elapsed_s"`
+	Done     int64     `json:"done"`  // vectors embedded so far
+	Total    int64     `json:"total"` // vectors expected; 0 while unknown
 }
 
 type EmbedStatus struct {

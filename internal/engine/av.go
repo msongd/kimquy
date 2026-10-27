@@ -92,6 +92,7 @@ func (e *Engine) embedAV(ctx context.Context, path string, k kind.Kind) ([]store
 				}
 				recs = append(recs, store.Record{Vec: v, Kind: k, Loc: batch[j].loc()})
 			}
+			progressDone(ctx, len(vecs))
 		}
 	}
 	if m.Audio && !e.info.Kinds.Has(kind.Audio) {
@@ -112,6 +113,7 @@ func (e *Engine) embedAV(ctx context.Context, path string, k kind.Kind) ([]store
 				return nil, "", fmt.Errorf("embedder returned %d dims, announced %d", len(v), e.info.Dims)
 			}
 			recs = append(recs, store.Record{Vec: v, Kind: k, Loc: w.loc()})
+			progressDone(ctx, 1)
 		}
 		// Quiet passages are normal; only a wholly silent track is worth a note.
 		if silent > 0 && silent == len(wins) {

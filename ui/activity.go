@@ -73,6 +73,8 @@ func eventLabel(typ string) string {
 		return "Scan"
 	case "retry":
 		return "Retry"
+	case "slow":
+		return "Slow"
 	case "reindex":
 		return "Rebuild"
 	case "watch":

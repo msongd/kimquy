@@ -95,6 +95,7 @@ func (e *Engine) scan(ctx context.Context, under string) error {
 }
 
 func (e *Engine) process(ctx context.Context, path string) error {
+	start := time.Now()
 	e.storeMu.RLock()
 	defer e.storeMu.RUnlock()
 	st := e.store
@@ -199,11 +200,13 @@ func (e *Engine) process(ctx context.Context, path string) error {
 		return err
 	}
 	e.clearProblem(path)
-	msg := fmt.Sprintf("%d vectors", len(recs))
+	took := time.Since(start).Round(time.Millisecond)
+	msg := fmt.Sprintf("%d vectors in %v", len(recs), took)
 	if note != "" {
 		e.log.Warn("indexed partially", "path", path, "why", note)
 		msg += "; " + note
 	}
+	e.log.Info("indexed", "path", path, "vectors", len(recs), "took", took)
 	e.bus.Publish(events.Event{Type: "indexed", Path: path, Msg: msg})
 	return nil
 }
@@ -313,6 +316,7 @@ func (e *Engine) embedText(ctx context.Context, title string, k kind.Kind, text 
 	for _, c := range chunk.Split(text, chunk.Options{}) {
 		b.add(c.Text, kind.Locator{Kind: kind.LocBytes, Start: int64(c.Start), End: int64(c.End)})
 	}
+	progressExpect(ctx, len(b.texts))
 	return b.flush(ctx, e, title, k, nil)
 }
 
@@ -363,6 +367,7 @@ func (e *Engine) embedChunks(ctx context.Context, title string, k kind.Kind, tex
 			}
 			recs = append(recs, store.Record{Vec: v, Kind: k, Loc: locs[i+j]})
 		}
+		progressDone(ctx, len(vecs))
 	}
 	return recs, nil
 }
@@ -386,6 +391,7 @@ func (e *Engine) embedMedia(ctx context.Context, path string, k kind.Kind) (recs
 		if len(v) != e.info.Dims {
 			return nil, "", fmt.Errorf("embedder returned %d dims, announced %d", len(v), e.info.Dims)
 		}
+		progressDone(ctx, 1)
 		return []store.Record{{Vec: v, Kind: k}}, "", nil
 	case kind.PDF:
 		return e.embedPDF(ctx, path)
@@ -419,6 +425,7 @@ func (e *Engine) embedPDF(ctx context.Context, path string) ([]store.Record, str
 			case pg.Vec != nil:
 				budget--
 				recs = append(recs, store.Record{Vec: pg.Vec, Kind: kind.PDF, Loc: kind.Locator{Kind: kind.LocPage, Page: uint16(pg.Page)}})
+				progressDone(ctx, 1)
 			case pg.Unrendered:
 				unrendered++
 			default:

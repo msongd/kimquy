@@ -77,6 +77,21 @@ semctl events        # stream indexing progress
 
 Run `semctl -h` for all commands.
 
+### When indexing seems stuck
+
+- `semctl status`: `paused` gives the reason (manual, on battery, Low Power
+  Mode, hot). `working` lists the files in flight, with `elapsed_s` and
+  `done`/`total` vectors (`total` is 0 while unknown). `pending` counts the
+  queue, which holds at most 1024 paths, so a large number there is normal.
+- `semctl events`: an `indexed` line per file, with its vector count and time.
+  A file still running after 5 minutes gets a `slow` line.
+- `semctl failures`: files that could not be indexed and why. They are
+  retried only when they change.
+- The log, `~/Library/Logs/Kim Quy/dev.kimquy.semd.log`, has the same
+  `indexed`, `slow file`, retry and pause lines. If it shows no new lines and
+  `working` is empty, the Mac may have been asleep:
+  `pmset -g log | grep -E " (Sleep|Wake) "`.
+
 ## Privacy
 
 Kim Quy reads only the folders you choose. Indexing `~/Documents`,

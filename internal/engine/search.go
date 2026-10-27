@@ -240,6 +240,7 @@ type Status struct {
 	Scanning   bool         `json:"scanning"`
 	Watch      string       `json:"watch"` // off | idle | replaying | live
 	Paused     []string     `json:"paused,omitempty"`
+	Working    []Job        `json:"working"` // files in flight, oldest first
 	Embedder   EmbedStatus  `json:"embedder"`
 	Store      *store.Stats `json:"store,omitempty"`
 	StoreError string       `json:"store_error,omitempty"`
@@ -266,6 +267,7 @@ func (e *Engine) Status() Status {
 		Scanning: e.scanning.Load() != 0,
 		Watch:    e.watchStatus.Load().(string),
 		Paused:   e.q.PausedReasons(),
+		Working:  e.working(),
 		Embedder: EmbedStatus{Model: e.info.Model, Precision: e.info.Precision, Dims: e.info.Dims},
 	}
 	e.storeMu.RLock()

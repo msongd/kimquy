@@ -95,6 +95,9 @@ type Engine struct {
 	problems map[string]string // path → error for things not in the catalog
 	badRoots map[string]string
 
+	jobsMu sync.Mutex
+	jobs   map[string]*job // path → file being processed
+
 	scanning  atomic.Int32 // full and subtree scans running
 	scanReq   chan struct{}
 	scanReqN  atomic.Uint64 // full scans requested …
@@ -142,7 +145,7 @@ func Open(opt Options) (*Engine, error) {
 		dir: opt.StateDir, emb: opt.Embedder, media: media, info: info, log: opt.Logger, bus: opt.Bus,
 		prof:     store.Profile{Model: info.Model, Precision: info.Precision, Dim: StoreDim},
 		q:        sched.NewQueue(opt.QueueCap),
-		problems: map[string]string{}, badRoots: map[string]string{},
+		problems: map[string]string{}, badRoots: map[string]string{}, jobs: map[string]*job{},
 		scanReq: make(chan struct{}, 1),
 		watch:   opt.Watch, rootsChanged: make(chan struct{}, 1),
 		power: opt.Power, powerEvery: opt.PowerEvery,
@@ -406,7 +409,9 @@ func (e *Engine) worker(ctx context.Context, fatal func(error)) {
 		if err != nil {
 			return
 		}
-		err = e.process(ctx, p)
+		jctx, j := e.startJob(ctx, p)
+		err = e.process(jctx, p)
+		e.endJob(j)
 		retry := err != nil && ctx.Err() == nil && errors.Is(err, errTransient)
 		if retry {
 			// p is in flight, so Add only marks it and never blocks; Done
