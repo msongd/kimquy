@@ -74,6 +74,8 @@ testdata/              fixtures + golden vectors
 | POST | `/v1/pause`, `/v1/resume` | Manual indexing control |
 | POST | `/v1/reindex` | Full rebuild (also required after a precision change) |
 | GET | `/v1/failures` | Files that failed, with reasons (fail loud, visibly) |
+| POST | `/v1/preview` | `{path, locator?}` → the text around the match and the file's details (quick view) |
+| GET | `/v1/thumbnail?path=` | An indexed image, small enough to show (PNG/JPEG/GIF/WebP/BMP as is, else scaled by `sips`) |
 
 `locator` = byte range (text), page number (PDF), or timestamp (audio/video).
 
@@ -142,6 +144,8 @@ testdata/              fixtures + golden vectors
 - Settings sheet: roots add/remove (folder dialog), excludes, pause-on-battery toggle, status
   and failures list.
 - Optional: menu-bar icon and a global shortcut to summon the search window.
+- Quick view (M8): an eye on each result, or ⌘I, opens a side pane with the chosen hit's text
+  scrolled to the match (or the picture of an image), and the file's details below.
 
 ## 7. Packaging and OS integration
 
@@ -164,6 +168,7 @@ testdata/              fixtures + golden vectors
 | M5 | FSEvents watcher + event-ID replay + CPU/thermal/battery policy | Edits show up in results within 5 s; no full rescan after a restart |
 | M6 | MyGo UI | Search, open/reveal, roots, status |
 | M7 | Packaging: LaunchAgent, TCC flow, signing/notarization, dmg | Clean install on a fresh Mac, works with networking disabled |
+| M8 | Quick view pane: `/v1/preview`, `/v1/thumbnail`, `semctl preview`, side pane in the UI | A hit previews at its match, with its details, for every kind; the pane follows the chosen row and fits the smallest window |
 
 Note: Go packages for store, catalog, chunker, extractors and the API can be built and tested on any OS
 using the fake embedder. The sidecar, FSEvents and packaging need a Mac.

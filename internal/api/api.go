@@ -24,11 +24,12 @@ const maxBody = 64 << 10
 // engine values (search hits, status, failures) are encoded from the
 // engine's own types; api_test checks that the client's mirror them.
 type (
-	SearchRequest = client.SearchRequest
-	RootsRequest  = client.RootsRequest
-	RootsResponse = client.RootsResponse
-	Settings      = client.Settings
-	Error         = client.Error
+	SearchRequest  = client.SearchRequest
+	PreviewRequest = client.PreviewRequest
+	RootsRequest   = client.RootsRequest
+	RootsResponse  = client.RootsResponse
+	Settings       = client.Settings
+	Error          = client.Error
 )
 
 // SearchResponse is the reply to POST /v1/search.
@@ -47,6 +48,8 @@ func Handler(e *engine.Engine, log *slog.Logger) http.Handler {
 	s := &server{e: e, log: log.With("component", "api")}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/search", s.search)
+	mux.HandleFunc("POST /v1/preview", s.preview)
+	mux.HandleFunc("GET /v1/thumbnail", s.thumbnail)
 	mux.HandleFunc("GET /v1/roots", s.getRoots)
 	mux.HandleFunc("PUT /v1/roots", s.putRoots)
 	mux.HandleFunc("GET /v1/status", func(w http.ResponseWriter, r *http.Request) { reply(w, http.StatusOK, e.Status()) })
@@ -131,6 +134,47 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 		hits = []engine.Hit{}
 	}
 	reply(w, http.StatusOK, SearchResponse{Hits: hits, TookMS: time.Since(t0).Milliseconds()})
+}
+
+func (s *server) preview(w http.ResponseWriter, r *http.Request) {
+	var req PreviewRequest
+	if !s.decode(w, r, &req) {
+		return
+	}
+	p, err := s.e.Preview(r.Context(), req.Path, req.Locator)
+	if err != nil {
+		s.fail(w, previewCode(err), err)
+		return
+	}
+	reply(w, http.StatusOK, p)
+}
+
+// thumbnail replies with the image itself, not JSON.
+func (s *server) thumbnail(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	if len(q) != 1 || len(q["path"]) != 1 {
+		s.fail(w, http.StatusBadRequest, errors.New("want exactly one query parameter, path"))
+		return
+	}
+	data, typ, err := s.e.Thumbnail(r.Context(), q.Get("path"))
+	if err != nil {
+		s.fail(w, previewCode(err), err)
+		return
+	}
+	w.Header().Set("Content-Type", typ)
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	w.Write(data)
+}
+
+func previewCode(err error) int {
+	switch {
+	case errors.Is(err, engine.ErrBadPreview):
+		return http.StatusBadRequest
+	case errors.Is(err, engine.ErrNotIndexed):
+		return http.StatusNotFound
+	}
+	return http.StatusInternalServerError
 }
 
 func rootsResponse(c config.Config) RootsResponse {

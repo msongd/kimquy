@@ -40,6 +40,10 @@ type fakeSemd struct {
 	paused   int
 	resumed  int
 	reindex  int
+	// previews answers Preview by path; a path without one is not indexed.
+	previews  map[string]client.Preview
+	previewed []client.PreviewRequest
+	thumbs    map[string][]byte // answers Thumbnail by path
 }
 
 func (f *fakeSemd) Search(ctx context.Context, r client.SearchRequest) (client.SearchResponse, error) {
@@ -88,6 +92,23 @@ func (f *fakeSemd) SetSettings(_ context.Context, s client.Settings) (client.Set
 func (f *fakeSemd) Pause(context.Context) error   { f.paused++; return f.down }
 func (f *fakeSemd) Resume(context.Context) error  { f.resumed++; return f.down }
 func (f *fakeSemd) Reindex(context.Context) error { f.reindex++; return f.down }
+
+func (f *fakeSemd) Preview(_ context.Context, r client.PreviewRequest) (client.Preview, error) {
+	f.previewed = append(f.previewed, r)
+	p, ok := f.previews[r.Path]
+	if !ok && f.down == nil {
+		return client.Preview{}, errors.New("not indexed")
+	}
+	return p, f.down
+}
+
+func (f *fakeSemd) Thumbnail(_ context.Context, path string) ([]byte, error) {
+	b, ok := f.thumbs[path]
+	if !ok {
+		return nil, errors.New("no thumbnail")
+	}
+	return b, nil
+}
 
 type fakeShell struct {
 	opened, revealed []string

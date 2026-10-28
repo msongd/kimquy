@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"image"
+	"image/png"
 	"io"
 	"log/slog"
 	"net"
@@ -195,6 +197,61 @@ func TestValidation(t *testing.T) {
 	}
 }
 
+func TestPreview(t *testing.T) {
+	c, dir := serve(t)
+	ctx := context.Background()
+	root := filepath.Join(dir, "docs")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root, _ = filepath.EvalSymlinks(root)
+	note := filepath.Join(root, "kv.md")
+	os.WriteFile(note, []byte("the quick brown fox jumps over the lazy dog"), 0o600)
+	var img bytes.Buffer
+	png.Encode(&img, image.NewGray(image.Rect(0, 0, 8, 4)))
+	pic := filepath.Join(root, "pic.png")
+	os.WriteFile(pic, img.Bytes(), 0o600)
+	if _, err := c.SetRoots(ctx, RootsRequest{Roots: []string{root}}); err != nil {
+		t.Fatal(err)
+	}
+	waitIdle(t, c)
+
+	p, err := c.Preview(ctx, PreviewRequest{Path: note, Locator: kind.Locator{Kind: kind.LocBytes, Start: 4, End: 9}})
+	if err != nil || p.Text[p.MatchStart:p.MatchEnd] != "quick" || p.Kind != "text" || p.Vectors != 1 || p.Modified.IsZero() {
+		t.Fatalf("preview: %v %+v", err, p)
+	}
+	got, err := c.Thumbnail(ctx, pic)
+	if err != nil || !bytes.Equal(got, img.Bytes()) {
+		t.Fatalf("thumbnail: %v, %d bytes", err, len(got))
+	}
+
+	for _, tc := range []struct {
+		req  PreviewRequest
+		code string
+	}{
+		{PreviewRequest{Path: filepath.Join(root, "nope.md")}, "HTTP 404"},
+		{PreviewRequest{Path: "relative.md"}, "HTTP 400"},
+		{PreviewRequest{Path: note, Locator: kind.Locator{Kind: kind.LocTime, Start: 0, End: 1}}, "HTTP 400"},
+	} {
+		if _, err := c.Preview(ctx, tc.req); err == nil || !strings.Contains(err.Error(), tc.code) {
+			t.Errorf("%+v: want %s, got %v", tc.req, tc.code, err)
+		}
+	}
+	if _, err := c.Thumbnail(ctx, note); err == nil || !strings.Contains(err.Error(), "HTTP 400") {
+		t.Errorf("thumbnail of text: %v", err)
+	}
+	for _, q := range []string{"", "?path=a&path=b", "?path=" + pic + "&x=1"} {
+		resp, err := c.HTTP().Get("http://semd/v1/thumbnail" + q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("thumbnail%s: status %d", q, resp.StatusCode)
+		}
+	}
+}
+
 func TestEventsStream(t *testing.T) {
 	c, dir := serve(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -270,6 +327,10 @@ func TestClientMirrorsEngine(t *testing.T) {
 		Embedder: engine.EmbedStatus{Model: "m", Precision: "p", Dims: 4},
 		Store:    &store.Stats{Segments: 1, Records: 2, Dead: 3, Files: 4}, StoreError: "e",
 		Roots: []engine.RootStatus{{Path: "/r", Error: "EPERM"}}}, &client.Status{})
+	mirror(t, engine.Preview{Path: "/p", Kind: "pdf", Locator: kind.Locator{Kind: kind.LocPage, Page: 2, Start: 1, End: 4},
+		Size: 9, Modified: time.Unix(1, 0).UTC(), Indexed: time.Unix(2, 0).UTC(), Status: "indexed", Vectors: 3,
+		SHA256: "ab", Stale: true, Pages: 4, Duration: 5, Width: 6, Height: 7,
+		Text: "text", TextStart: 8, TextTotal: 20, MatchStart: 1, MatchEnd: 3, TextError: "e"}, &client.Preview{})
 	mirror(t, []engine.Failure{{Path: "/f", Error: "bad"}}, &[]client.Failure{})
 }
 

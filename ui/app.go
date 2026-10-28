@@ -65,6 +65,11 @@ type backend interface {
 	Pause(context.Context) error
 	Resume(context.Context) error
 	Reindex(context.Context) error
+	// Preview is the file of a hit as the quick view shows it: its text
+	// around the match and its details.
+	Preview(context.Context, client.PreviewRequest) (client.Preview, error)
+	// Thumbnail is an image's picture, small enough to show.
+	Thumbnail(ctx context.Context, path string) ([]byte, error)
 	// Events streams semd's events until ctx ends or the connection drops;
 	// the first is "open".
 	Events(context.Context, func(events.Event)) error
@@ -126,6 +131,7 @@ type app struct {
 	searchErr string
 	chosen    int
 	list      ui.ListState
+	quick     quickView
 	notice    string // the last action that failed, shown until the next
 
 	status     client.Status
@@ -216,7 +222,11 @@ func (a *app) view(c *ui.Context) {
 		if c.Shortcut(ui.Cmd, ui.KeyEnter) {
 			a.open(true)
 		}
+		if c.Shortcut(ui.Cmd, ui.KeyI) { // not Cmd-Y, the input's redo
+			a.quickKey()
+		}
 	}
+	a.syncQuick()
 	if c.Shortcut(ui.Cmd, ui.KeyComma) && !a.modalOpen() {
 		a.openSettings()
 	}
@@ -247,18 +257,25 @@ func (a *app) view(c *ui.Context) {
 		a.list.Selected = &a.chosen
 		a.list.Key = func(i int) any { return hitKey(a.hits[i]) }
 		a.list.Label = func(i int) string { return filepath.Base(a.hits[i].Path) }
-		list := ui.List(c, &a.list, len(a.hits), func(i int) { a.row(c, i) }).Grow(1).Padding(6).Children(func() {
-			if len(a.hits) == 0 {
-				ui.Text(c, a.emptyText()).TextColor(t.TextMuted).Padding(16)
+		results := func() {
+			list := ui.List(c, &a.list, len(a.hits), func(i int) { a.row(c, i) }).Fill().Padding(6).Children(func() {
+				if len(a.hits) == 0 {
+					ui.Text(c, a.emptyText()).TextColor(t.TextMuted).Padding(16)
+				}
+			})
+			if list.Submitted() {
+				a.open(false)
 			}
-		})
-		if list.Submitted() {
-			a.open(false)
+		}
+		if a.quick.open {
+			ui.SplitPercent(c, &a.quick.split, results, func() { a.quickPane(c) }).Grow(1)
+		} else {
+			ui.Column(c).Grow(1).Children(results)
 		}
 		ui.Divider(c)
 		ui.Row(c).Padding(8, 16).Gap(16).Children(func() {
 			ui.Text(c, a.statusLine()).FontSize(11).TextColor(t.TextMuted).Grow(1).SingleLine()
-			ui.Text(c, "↑↓ Choose   ↵ Open   ⌘↵ Show in Finder").FontSize(11).TextColor(t.TextMuted)
+			ui.Text(c, "↑↓ Choose   ↵ Open   ⌘↵ Show in Finder   ⌘I Quick Look").FontSize(11).TextColor(t.TextMuted)
 		})
 	})
 	if a.settingsOpen {
@@ -575,6 +592,7 @@ func (a *app) row(c *ui.Context, i int) {
 			}
 			ui.Text(c, name).TextColor(text).Bold().SingleLine().Grow(1)
 			ui.Text(c, fmt.Sprintf("%.2f", h.Score)).FontSize(11).TextColor(muted)
+			a.quickButton(c, i, text)
 		})
 		where := tildePath(filepath.Dir(h.Path))
 		if loc := locatorText(h.Locator); loc != "" {

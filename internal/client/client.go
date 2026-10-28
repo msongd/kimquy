@@ -13,6 +13,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -42,6 +43,40 @@ type Hit struct {
 	Score   float32      `json:"score"`
 	Snippet string       `json:"snippet,omitempty"`
 	Stale   bool         `json:"stale,omitempty"` // file changed since it was indexed
+}
+
+// PreviewRequest is the body of POST /v1/preview: the file, and the hit in
+// it whose text to show (the zero Locator for none).
+type PreviewRequest struct {
+	Path    string       `json:"path"`
+	Locator kind.Locator `json:"locator"`
+}
+
+// Preview is the reply to POST /v1/preview: an indexed file's details and,
+// for text, Office and PDF files, a window of its text around the hit.
+type Preview struct {
+	Path     string       `json:"path"`
+	Kind     string       `json:"kind"`
+	Locator  kind.Locator `json:"locator"`
+	Size     int64        `json:"size"`
+	Modified time.Time    `json:"modified,omitzero"`
+	Indexed  time.Time    `json:"indexed,omitzero"`
+	Status   string       `json:"status"`
+	Vectors  int          `json:"vectors"`
+	SHA256   string       `json:"sha256,omitempty"`
+	Stale    bool         `json:"stale,omitempty"`
+	Pages    int          `json:"pages,omitempty"`
+	Duration int64        `json:"duration_ms,omitempty"`
+	Width    int          `json:"width,omitempty"`
+	Height   int          `json:"height,omitempty"`
+	// Text starts at TextStart of TextTotal bytes of the extracted text;
+	// [MatchStart, MatchEnd) in it is the hit, empty for none.
+	Text       string `json:"text,omitempty"`
+	TextStart  int64  `json:"text_start"`
+	TextTotal  int64  `json:"text_total"`
+	MatchStart int    `json:"match_start"`
+	MatchEnd   int    `json:"match_end"`
+	TextError  string `json:"text_error,omitempty"`
 }
 
 // RootsRequest is the body of PUT /v1/roots. A nil Excludes keeps the current ones.
@@ -171,7 +206,11 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		}
 		return fmt.Errorf("semd: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
-	if out == nil {
+	switch out := out.(type) {
+	case nil:
+		return nil
+	case *[]byte: // the body as it is
+		*out = b
 		return nil
 	}
 	return json.Unmarshal(b, out)
@@ -181,6 +220,24 @@ func (c *Client) Search(ctx context.Context, req SearchRequest) (SearchResponse,
 	var r SearchResponse
 	err := c.do(ctx, http.MethodPost, "/v1/search", req, &r)
 	return r, err
+}
+
+func (c *Client) Preview(ctx context.Context, req PreviewRequest) (Preview, error) {
+	var p Preview
+	if err := c.do(ctx, http.MethodPost, "/v1/preview", req, &p); err != nil {
+		return Preview{}, err
+	}
+	if p.MatchStart < 0 || p.MatchEnd < p.MatchStart || p.MatchEnd > len(p.Text) {
+		return Preview{}, fmt.Errorf("semd: bad preview: match [%d,%d) of %d bytes", p.MatchStart, p.MatchEnd, len(p.Text))
+	}
+	return p, nil
+}
+
+// Thumbnail returns the indexed image at path, scaled down if it is big.
+func (c *Client) Thumbnail(ctx context.Context, path string) ([]byte, error) {
+	var b []byte
+	err := c.do(ctx, http.MethodGet, "/v1/thumbnail?path="+url.QueryEscape(path), nil, &b)
+	return b, err
 }
 
 func (c *Client) Status(ctx context.Context) (Status, error) {

@@ -18,12 +18,15 @@ import (
 	"github.com/msongd/kimquy/internal/client"
 	"github.com/msongd/kimquy/internal/config"
 	"github.com/msongd/kimquy/internal/events"
+	"github.com/msongd/kimquy/internal/kind"
 )
 
 const usage = `usage: semctl [-socket path] [-json] <command> [args]
 
 commands:
   search [-k N] [-kind text,office,...] [-root DIR]... <query...>
+  preview PATH [LOCATOR]        details and text of an indexed file;
+                                LOCATOR as search prints it, e.g. page:3:0-120
   status
   roots                         list indexed directories
   roots set [-exclude GLOB]... DIR...   replace indexed directories
@@ -117,6 +120,27 @@ func run() error {
 			}
 			fmt.Fprintf(os.Stderr, "%d hits in %d ms\n", len(res.Hits), res.TookMS)
 		})
+	case "preview":
+		if len(args) < 1 || len(args) > 2 {
+			return errors.New("usage: preview PATH [LOCATOR]")
+		}
+		path, err := filepath.Abs(args[0])
+		if err != nil {
+			return err
+		}
+		req := client.PreviewRequest{Path: path}
+		if len(args) == 2 {
+			if req.Locator, err = kind.ParseLocator(args[1]); err != nil {
+				return err
+			}
+		}
+		tctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		p, err := c.Preview(tctx, req)
+		if err != nil {
+			return err
+		}
+		return print(p, func() { printPreview(p) })
 	case "status":
 		s, err := c.Status(ctx)
 		if err != nil {
@@ -194,6 +218,41 @@ func run() error {
 	}
 	fs.Usage()
 	return fmt.Errorf("unknown command %q", cmd)
+}
+
+// printPreview prints a preview's details, then its text with the match
+// between » and «.
+func printPreview(p client.Preview) {
+	fmt.Printf("%s\n  %s, %d bytes, %s, %d vectors\n", p.Path, p.Kind, p.Size, p.Status, p.Vectors)
+	if !p.Modified.IsZero() {
+		fmt.Printf("  modified %s\n", p.Modified.Format(time.DateTime))
+	}
+	if !p.Indexed.IsZero() {
+		fmt.Printf("  indexed  %s\n", p.Indexed.Format(time.DateTime))
+	}
+	if p.Stale {
+		fmt.Println("  changed since indexed")
+	}
+	switch {
+	case p.Pages > 0:
+		fmt.Printf("  %d pages\n", p.Pages)
+	case p.Duration > 0:
+		fmt.Printf("  %d ms\n", p.Duration)
+	case p.Width > 0:
+		fmt.Printf("  %d×%d pixels\n", p.Width, p.Height)
+	}
+	if p.TextError != "" {
+		fmt.Println("  no text:", p.TextError)
+	}
+	if p.Text == "" {
+		return
+	}
+	fmt.Printf("--- bytes %d–%d of %d\n", p.TextStart, p.TextStart+int64(len(p.Text)), p.TextTotal)
+	if p.MatchEnd > p.MatchStart {
+		fmt.Printf("%s»%s«%s\n", p.Text[:p.MatchStart], p.Text[p.MatchStart:p.MatchEnd], p.Text[p.MatchEnd:])
+	} else {
+		fmt.Println(p.Text)
+	}
 }
 
 // agentCmd manages the LaunchAgent that runs semd.

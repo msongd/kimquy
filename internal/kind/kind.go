@@ -145,6 +145,52 @@ func (l Locator) String() string {
 	return "none"
 }
 
+// ParseLocator reads a locator as String writes it, e.g. from semctl
+// search's output.
+func ParseLocator(s string) (Locator, error) {
+	var l Locator
+	bad := func() (Locator, error) { return Locator{}, fmt.Errorf("bad locator %q", s) }
+	typ, rest, _ := strings.Cut(s, ":")
+	var err error
+	switch typ {
+	case "none":
+		if rest != "" {
+			return bad()
+		}
+		return l, nil
+	case "bytes":
+		l.Kind = LocBytes
+		_, err = fmt.Sscanf(rest, "%d-%d", &l.Start, &l.End)
+	case "time":
+		l.Kind = LocTime
+		rest, ok := strings.CutSuffix(rest, "ms")
+		if !ok {
+			return bad()
+		}
+		_, err = fmt.Sscanf(rest, "%d-%d", &l.Start, &l.End)
+	case "page":
+		l.Kind = LocPage
+		page, rng, hasRange := strings.Cut(rest, ":")
+		var n int
+		if _, err = fmt.Sscanf(page, "%d", &n); err == nil && (n < 1 || n > MaxPage) {
+			return bad()
+		}
+		l.Page = uint16(n)
+		if err == nil && hasRange {
+			_, err = fmt.Sscanf(rng, "%d-%d", &l.Start, &l.End)
+		}
+	default:
+		return bad()
+	}
+	if err != nil || l.String() != s {
+		return bad() // trailing text, or a form String does not write
+	}
+	if err := l.Validate(); err != nil {
+		return Locator{}, err
+	}
+	return l, nil
+}
+
 var locNames = map[LocKind]string{LocNone: "none", LocBytes: "bytes", LocPage: "page", LocTime: "time"}
 
 type locJSON struct {
