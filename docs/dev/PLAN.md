@@ -84,7 +84,7 @@ testdata/              fixtures + golden vectors
 1. **Discover**: FSEvents stream over all roots (`kFSEventStreamCreateFlagFileEvents`). The last
    event ID is persisted, so after a restart we replay only the changes since then. On
    `MustScanSubDirs`, `UserDropped` or `KernelDropped`, rescan that subtree.
-2. **Filter**: excludes (hidden dirs, `node_modules`, `.git`, user globs), size caps per kind,
+2. **Filter**: excludes (hidden dirs, `node_modules`, `temp` dirs, `*.log`, `*.min.js`, user globs), size caps per kind,
    symlink loops, unreadable files (recorded as failures).
 3. **Change check**: size+mtime fast path, then a sha256 content hash. An unchanged hash means no work.
 4. **Route by kind**:

@@ -34,7 +34,7 @@ type Config struct {
 }
 
 // DefaultExcludes are always applied in addition to Config.Excludes.
-var DefaultExcludes = []string{".*", "node_modules", "__pycache__", "*.tmp", "*~"}
+var DefaultExcludes = []string{".*", "node_modules", "__pycache__", "temp", "*.tmp", "*~", "*.log", "*.min.js"}
 
 // Default returns the configuration used when no file exists yet.
 func Default() Config {

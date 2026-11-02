@@ -173,6 +173,23 @@ func TestModelBatchInvariance(t *testing.T) {
 	}
 }
 
+// TestModelLineSeparators: JSON leaves CR (escaped, but checked anyway),
+// NEL, LS and PS in strings, and the sidecar must split requests on "\n"
+// only. A minified JS bundle with one NEL used to kill it.
+func TestModelLineSeparators(t *testing.T) {
+	s := startModel(t)
+	ctx := context.Background()
+	for _, sep := range []string{"\r", "\u0085", "\u2028", "\u2029", "\r\n"} {
+		v, err := s.EmbedTexts(ctx, Index, []string{DocPrompt("", "before"+sep+"after")})
+		if err != nil {
+			t.Fatalf("separator %q: %v", sep, err)
+		}
+		if len(v) != 1 || len(v[0]) != modelDims {
+			t.Fatalf("separator %q: got %d vectors", sep, len(v))
+		}
+	}
+}
+
 // chunkText is roughly a 1500-character chunk, the pipeline's chunk size.
 var chunkText = strings.Repeat("Quarterly revenue grew in the northern region while logistics costs fell; the board approved the new warehouse plan. ", 13)
 

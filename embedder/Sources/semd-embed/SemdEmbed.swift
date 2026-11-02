@@ -28,6 +28,33 @@ func die(_ s: String) -> Never {
     exit(1)
 }
 
+/// Mirrors embed.MaxLine.
+let maxLine = 16 << 20
+
+/// Splits the protocol stream on "\n" only. AsyncBytes.lines also breaks at
+/// CR, NEL (U+0085), LS and PS, which JSON strings may carry unescaped, so
+/// a text containing one would arrive cut in two.
+struct RequestLines: AsyncSequence {
+    typealias Element = Data
+    let bytes: FileHandle.AsyncBytes
+
+    struct AsyncIterator: AsyncIteratorProtocol {
+        var it: FileHandle.AsyncBytes.AsyncIterator
+
+        mutating func next() async throws -> Data? {
+            var buf = Data()
+            while let b = try await it.next() {
+                if b == 0x0A { return buf }
+                guard buf.count < maxLine else { die("request line over \(maxLine) bytes") }
+                buf.append(b)
+            }
+            return buf.isEmpty ? nil : buf
+        }
+    }
+
+    func makeAsyncIterator() -> AsyncIterator { AsyncIterator(it: bytes.makeAsyncIterator()) }
+}
+
 // MARK: options
 
 struct Options {
@@ -436,8 +463,8 @@ struct SemdEmbed {
         }
 
         do {
-            for try await line in FileHandle.standardInput.bytes.lines {
-                guard let r = try? JSONDecoder().decode(Request.self, from: Data(line.utf8)) else {
+            for try await line in RequestLines(bytes: FileHandle.standardInput.bytes) {
+                guard let r = try? JSONDecoder().decode(Request.self, from: line) else {
                     die("malformed request line")  // semd never sends one: fail loudly
                 }
                 switch r.op {

@@ -36,7 +36,7 @@ func TestWorkingAndSlowFile(t *testing.T) {
 
 	root, state := t.TempDir(), t.TempDir()
 	root, _ = filepath.EvalSymlinks(root)
-	big := filepath.Join(root, "big.log")
+	big := filepath.Join(root, "big.txt")
 	write(t, big, strings.Repeat("alpha beta gamma delta ", 20000)) // several batches
 	g := &gated{Fake: embed.Fake{Dims: 768}, release: make(chan struct{})}
 	h := start(t, state, root, g)
