@@ -6,7 +6,7 @@ Built 2026-10-26 on the same machine as `M0-RESULTS.md`.
 
 | Check | Result |
 |---|---|
-| Search | Debounced (200 ms), results ranked by score; checked against a real semd with the real model |
+| Search | Debounced (200 ms), results ranked by score; checked against a real semd with the real model. Later: 350 ms for a query under 5 letters, and under 3 (a CJK character counts as 3) it searches only on Enter |
 | Open / reveal | Enter or a double click opens the file; ⌘-Enter shows it in Finder |
 | Roots | Add (folder dialog, several at once) and remove; root errors shown, with a Full Disk Access hint for EPERM |
 | Status | Footer line, polled every 2 s (event-driven since M7); error banner when semd is unreachable; details in Settings |

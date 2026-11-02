@@ -155,9 +155,10 @@ func (a *app) rootsUpdated() {
 	}
 }
 
-// filtersChanged searches again now, without the typing pause.
+// filtersChanged searches again now, without the typing pause; a query
+// too short to search as one types still waits for Enter.
 func (a *app) filtersChanged() {
-	if q := strings.TrimSpace(a.query); q != "" {
+	if q := strings.TrimSpace(a.query); q != "" && !a.short {
 		a.due = time.Time{}
 		a.search(q)
 	}

@@ -152,11 +152,20 @@ func (s *server) preview(w http.ResponseWriter, r *http.Request) {
 // thumbnail replies with the image itself, not JSON.
 func (s *server) thumbnail(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	if len(q) != 1 || len(q["path"]) != 1 {
-		s.fail(w, http.StatusBadRequest, errors.New("want exactly one query parameter, path"))
+	_, hasLoc := q["locator"]
+	if len(q["path"]) != 1 || len(q["locator"]) > 1 || len(q) != 1+len(q["locator"]) {
+		s.fail(w, http.StatusBadRequest, errors.New("want query parameters path and, optionally, locator"))
 		return
 	}
-	data, typ, err := s.e.Thumbnail(r.Context(), q.Get("path"))
+	var loc kind.Locator
+	if hasLoc {
+		var err error
+		if loc, err = kind.ParseLocator(q.Get("locator")); err != nil {
+			s.fail(w, http.StatusBadRequest, err)
+			return
+		}
+	}
+	data, typ, err := s.e.Thumbnail(r.Context(), q.Get("path"), loc)
 	if err != nil {
 		s.fail(w, previewCode(err), err)
 		return
@@ -173,6 +182,10 @@ func previewCode(err error) int {
 		return http.StatusBadRequest
 	case errors.Is(err, engine.ErrNotIndexed):
 		return http.StatusNotFound
+	case errors.Is(err, engine.ErrBusy):
+		return http.StatusServiceUnavailable
+	case errors.Is(err, embed.ErrInvalidInput):
+		return http.StatusUnprocessableEntity // the file is not what it was: changed or damaged
 	}
 	return http.StatusInternalServerError
 }

@@ -21,6 +21,10 @@ package embed
 //	← {"id":4,"page_count":12,"pages":[{"page":1,"text":"…"},{"page":2,"text":"","vector":"…"},
 //	   {"page":3,"text":" ","unrendered":true},…]}
 //
+//	→ {"id":8,"op":"render_pdf_page","priority":"query","path":"/abs/a.pdf","from":3,
+//	   "match_start":120,"match_end":164}
+//	← {"id":8,"page_count":12,"png":"<base64 PNG>"}
+//
 //	→ {"id":5,"op":"probe_media","priority":"index","path":"/abs/talk.mp4"}
 //	← {"id":5,"duration_ms":95000,"audio":true,"video":true}
 //
@@ -38,6 +42,12 @@ package embed
 // image while the "render" budget lasts, and marked unrendered after.
 // Page text over MaxPDFPageText bytes, encrypted or unreadable files are
 // "invalid".
+//
+// render_pdf_page is offered with "pdf". It draws page "from" for the quick
+// view, at most PDFPictureMaxSide on its longest side, with the text in
+// the UTF-8 byte range [match_start, match_end) of the page's text (as
+// extract_pdf returns it) highlighted; a range that does not fit the text
+// highlights nothing. A page past the end is "invalid".
 //
 // probe_media is offered with the "audio" or "video" modality, embed_audio
 // with "audio", embed_frames with "video". embed_audio mixes all audio
@@ -81,7 +91,7 @@ import (
 var errCallTimeout = errors.New("sidecar call timed out")
 
 const (
-	ProtocolVersion = 1
+	ProtocolVersion = 2 // 2: render_pdf_page
 	// MaxLine bounds one protocol line; a 64-text batch of 768-d vectors is ~270 KiB.
 	MaxLine = 16 << 20
 )
@@ -139,6 +149,9 @@ type request struct {
 	StartMS  *int64   `json:"start_ms,omitempty"`
 	EndMS    *int64   `json:"end_ms,omitempty"`
 	TimesMS  []int64  `json:"times_ms,omitempty"`
+	// MatchStart and MatchEnd are the range render_pdf_page highlights.
+	MatchStart int `json:"match_start,omitempty"`
+	MatchEnd   int `json:"match_end,omitempty"`
 }
 
 type helloReply struct {
@@ -166,6 +179,7 @@ type reply struct {
 	Audio     bool            `json:"audio"`
 	Video     bool            `json:"video"`
 	Silent    bool            `json:"silent"`
+	PNG       []byte          `json:"png"` // base64 on the wire
 	raw       json.RawMessage // the full line, for op-specific decoding
 }
 
@@ -324,6 +338,31 @@ func (s *Sidecar) ExtractPDF(ctx context.Context, p Priority, req PDFRequest) (P
 	}
 	if err := out.check(req, s.info.Dims); err != nil {
 		return PDFPages{}, s.violation(err)
+	}
+	return out, nil
+}
+
+// RenderPDFPage draws a page for the quick view, the match highlighted.
+func (s *Sidecar) RenderPDFPage(ctx context.Context, p Priority, req PDFPictureRequest) (PDFPicture, error) {
+	if !s.info.Kinds.Has(kind.PDF) || s.info.Kinds == 0 {
+		return PDFPicture{}, errors.New("sidecar: pdf modality not available")
+	}
+	if err := req.validate(); err != nil {
+		return PDFPicture{}, fmt.Errorf("sidecar: %w", err)
+	}
+	prio, release, err := s.admit(ctx, p)
+	if err != nil {
+		return PDFPicture{}, err
+	}
+	defer release()
+	r, err := s.call(ctx, request{Op: "render_pdf_page", Priority: prio, Path: req.Path, From: req.Page,
+		MatchStart: req.MatchStart, MatchEnd: req.MatchEnd})
+	if err != nil {
+		return PDFPicture{}, err
+	}
+	out := PDFPicture{PageCount: r.PageCount, PNG: r.PNG}
+	if err := out.check(req); err != nil {
+		return PDFPicture{}, s.violation(err)
 	}
 	return out, nil
 }

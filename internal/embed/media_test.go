@@ -1,6 +1,9 @@
 package embed
 
 import (
+	"bytes"
+	"image"
+	"image/png"
 	"strings"
 	"testing"
 )
@@ -55,5 +58,43 @@ func TestTooLittleText(t *testing.T) {
 	}
 	if TooLittleText(strings.Repeat("я", PDFRenderMinChars)) {
 		t.Error("enough text flagged")
+	}
+}
+
+func TestPDFPicture(t *testing.T) {
+	enc := func(w, h int) []byte {
+		var b bytes.Buffer
+		if err := png.Encode(&b, image.NewGray(image.Rect(0, 0, w, h))); err != nil {
+			t.Fatal(err)
+		}
+		return b.Bytes()
+	}
+	req := PDFPictureRequest{Path: "/a.pdf", Page: 2}
+	ok := PDFPicture{PageCount: 3, PNG: enc(30, 40)}
+	if err := ok.check(req); err != nil || ok.Width != 30 || ok.Height != 40 {
+		t.Fatalf("valid reply: %v %d×%d", err, ok.Width, ok.Height)
+	}
+	for name, r := range map[string]PDFPicture{
+		"no pages":  {PageCount: 0, PNG: enc(1, 1)},
+		"past end":  {PageCount: 1, PNG: enc(1, 1)},
+		"empty":     {PageCount: 3},
+		"not png":   {PageCount: 3, PNG: []byte("GIF89a")},
+		"too wide":  {PageCount: 3, PNG: enc(PDFPictureMaxSide+1, 2)},
+		"too large": {PageCount: 3, PNG: make([]byte, MaxPDFPicture+1)},
+	} {
+		if err := r.check(req); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	for _, r := range []PDFPictureRequest{
+		{Path: "rel.pdf", Page: 1},
+		{Path: "/a.pdf", Page: 0},
+		{Path: "/a.pdf", Page: 1, MatchStart: 5, MatchEnd: 2},
+		{Path: "/a.pdf", Page: 1, MatchStart: -1},
+		{Path: "/a.pdf", Page: 1, MatchEnd: MaxPDFPageText + 1},
+	} {
+		if r.validate() == nil {
+			t.Errorf("%+v accepted", r)
+		}
 	}
 }

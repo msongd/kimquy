@@ -44,6 +44,7 @@ type fakeSemd struct {
 	previews  map[string]client.Preview
 	previewed []client.PreviewRequest
 	thumbs    map[string][]byte // answers Thumbnail by path
+	thumbed   []string          // path#locator of each Thumbnail
 }
 
 func (f *fakeSemd) Search(ctx context.Context, r client.SearchRequest) (client.SearchResponse, error) {
@@ -102,7 +103,8 @@ func (f *fakeSemd) Preview(_ context.Context, r client.PreviewRequest) (client.P
 	return p, f.down
 }
 
-func (f *fakeSemd) Thumbnail(_ context.Context, path string) ([]byte, error) {
+func (f *fakeSemd) Thumbnail(_ context.Context, path string, loc kind.Locator) ([]byte, error) {
+	f.thumbed = append(f.thumbed, path+"#"+loc.String())
 	b, ok := f.thumbs[path]
 	if !ok {
 		return nil, errors.New("no thumbnail")
@@ -278,6 +280,63 @@ func TestSearchWaitsForPause(t *testing.T) {
 		t.Fatalf("searches %v", h.semd.searches)
 	}
 	h.want("No matches.")
+}
+
+// A query too short to mean much waits for Enter; a short one gets a
+// longer pause.
+func TestShortQuery(t *testing.T) {
+	h := newHarness(t)
+	h.semd.hits["re"] = []client.Hit{pdfHit}
+	h.Type("re")
+	h.Advance(time.Minute)
+	h.flush()
+	if len(h.semd.searches) != 0 {
+		t.Fatalf("searched %v", h.semd.searches)
+	}
+	h.want("Type at least 3 characters, or press ↵ to search.")
+	h.a.filtersChanged() // a filter change does not search it either
+	h.flush()
+	h.Key(0, ui.KeyEnter)
+	h.flush()
+	if !slices.Equal(h.semd.searches, []string{"re"}) || len(h.shell.opened) != 0 {
+		t.Fatalf("searches %v, opened %v", h.semd.searches, h.shell.opened)
+	}
+	h.want("report.pdf")
+	h.Key(0, ui.KeyEnter) // now it opens the result
+	h.Frame()
+	if !slices.Equal(h.shell.opened, []string{pdfHit.Path}) {
+		t.Fatalf("opened %v", h.shell.opened)
+	}
+
+	h.Type("v") // "rev": 3 letters, the longer pause
+	h.Advance(debounce)
+	h.flush()
+	if len(h.semd.searches) != 1 {
+		t.Fatalf("searched before the longer pause: %v", h.semd.searches)
+	}
+	h.want("Searching…")
+	h.Advance(shortDebounce - debounce)
+	h.flush()
+	if !slices.Equal(h.semd.searches, []string{"re", "rev"}) {
+		t.Fatalf("searches %v", h.semd.searches)
+	}
+
+	// Enter does not wait for the pause, and a CJK character is enough.
+	h.Key(0, ui.KeyEscape)
+	h.Type("雪")
+	h.Key(0, ui.KeyEnter)
+	h.flush()
+	if !slices.Equal(h.semd.searches, []string{"re", "rev", "雪"}) {
+		t.Fatalf("searches %v", h.semd.searches)
+	}
+}
+
+func TestQueryWeight(t *testing.T) {
+	for q, want := range map[string]int{"": 0, "re": 2, "a b": 2, "!?": 0, "Q3 2026": 6, "雪": minQuery, "東京": 2 * minQuery, "héllo": 5} {
+		if got := queryWeight(q); got != want {
+			t.Errorf("queryWeight(%q) = %d, want %d", q, got, want)
+		}
+	}
 }
 
 // A reply to an older query never replaces a newer one's.
@@ -462,8 +521,8 @@ func TestFormatting(t *testing.T) {
 // open it once each.
 func TestOpenFromList(t *testing.T) {
 	h := newHarness(t)
-	h.semd.hits["q"] = []client.Hit{pdfHit, talkHit}
-	h.Type("q")
+	h.semd.hits["quarter"] = []client.Hit{pdfHit, talkHit}
+	h.Type("quarter")
 	h.Advance(debounce)
 	h.flush()
 	h.click("~/Talks · 1:05–1:02:05")
@@ -505,7 +564,7 @@ func TestRealSemd(t *testing.T) {
 	h := (&harness{t: t}).start(client.NewClient(sock))
 	h.SetSize(760, 520)
 	h.Type(q)
-	h.Advance(debounce)
+	h.Key(0, ui.KeyEnter) // searches now, whatever its length
 	h.flush()
 	if h.a.statusErr != "" || h.a.searchErr != "" || len(h.a.hits) == 0 {
 		t.Fatalf("status %q, search %q, %d hits", h.a.statusErr, h.a.searchErr, len(h.a.hits))

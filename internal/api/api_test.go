@@ -211,6 +211,8 @@ func TestPreview(t *testing.T) {
 	png.Encode(&img, image.NewGray(image.Rect(0, 0, 8, 4)))
 	pic := filepath.Join(root, "pic.png")
 	os.WriteFile(pic, img.Bytes(), 0o600)
+	atlas := filepath.Join(root, "atlas.pdf") // the fake embedder's PDF: pages split by form feeds
+	os.WriteFile(atlas, []byte("Rivers cut V-shaped valleys into the hills.\fGlaciers carve U-shaped valleys instead."), 0o600)
 	if _, err := c.SetRoots(ctx, RootsRequest{Roots: []string{root}}); err != nil {
 		t.Fatal(err)
 	}
@@ -220,9 +222,22 @@ func TestPreview(t *testing.T) {
 	if err != nil || p.Text[p.MatchStart:p.MatchEnd] != "quick" || p.Kind != "text" || p.Vectors != 1 || p.Modified.IsZero() {
 		t.Fatalf("preview: %v %+v", err, p)
 	}
-	got, err := c.Thumbnail(ctx, pic)
+	got, err := c.Thumbnail(ctx, pic, kind.Locator{})
 	if err != nil || !bytes.Equal(got, img.Bytes()) {
 		t.Fatalf("thumbnail: %v, %d bytes", err, len(got))
+	}
+	got, err = c.Thumbnail(ctx, atlas, kind.Locator{Kind: kind.LocPage, Page: 2, Start: 0, End: 8})
+	if err != nil {
+		t.Fatalf("page picture: %v", err)
+	}
+	if cfg, err := png.DecodeConfig(bytes.NewReader(got)); err != nil || cfg.Width != 100 {
+		t.Fatalf("page picture: %v %+v", err, cfg)
+	}
+	if _, err := c.Thumbnail(ctx, atlas, kind.Locator{Kind: kind.LocPage, Page: 3}); err == nil || !strings.Contains(err.Error(), "HTTP 422") {
+		t.Errorf("page past the end: %v", err)
+	}
+	if _, err := c.Thumbnail(ctx, pic, kind.Locator{Kind: kind.LocPage, Page: 1}); err == nil || !strings.Contains(err.Error(), "HTTP 400") {
+		t.Errorf("page of an image: %v", err)
 	}
 
 	for _, tc := range []struct {
@@ -237,10 +252,11 @@ func TestPreview(t *testing.T) {
 			t.Errorf("%+v: want %s, got %v", tc.req, tc.code, err)
 		}
 	}
-	if _, err := c.Thumbnail(ctx, note); err == nil || !strings.Contains(err.Error(), "HTTP 400") {
+	if _, err := c.Thumbnail(ctx, note, kind.Locator{}); err == nil || !strings.Contains(err.Error(), "HTTP 400") {
 		t.Errorf("thumbnail of text: %v", err)
 	}
-	for _, q := range []string{"", "?path=a&path=b", "?path=" + pic + "&x=1"} {
+	for _, q := range []string{"", "?path=a&path=b", "?path=" + pic + "&x=1", "?locator=page:1",
+		"?path=" + atlas + "&locator=page:0", "?path=" + atlas + "&locator=page:1&locator=page:2"} {
 		resp, err := c.HTTP().Get("http://semd/v1/thumbnail" + q)
 		if err != nil {
 			t.Fatal(err)

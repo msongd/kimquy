@@ -1,6 +1,7 @@
 package embed
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"image"
@@ -202,6 +203,39 @@ func TestModelPDF(t *testing.T) {
 		t.Fatalf("past the end: %+v, %v", r, err)
 	}
 
+	// The page for the quick view: the match highlighted, nothing else
+	// changed. The range is of the text as extract_pdf returns it.
+	r, err = s.ExtractPDF(ctx, Query, PDFRequest{Path: p, From: 1, Count: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := strings.Index(r.Pages[0].Text, "U-shaped")
+	if at < 0 {
+		t.Fatalf("no match in %q", r.Pages[0].Text)
+	}
+	plain, err := s.RenderPDFPage(ctx, Query, PDFPictureRequest{Path: p, Page: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lit, err := s.RenderPDFPage(ctx, Query, PDFPictureRequest{Path: p, Page: 1, MatchStart: at, MatchEnd: at + len("U-shaped")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain.PageCount != 4 || max(plain.Width, plain.Height) != PDFPictureMaxSide || plain.Width != lit.Width {
+		t.Fatalf("picture %d×%d of %d pages", plain.Width, plain.Height, plain.PageCount)
+	}
+	if n := differentPixels(t, plain.PNG, lit.PNG); n == 0 || n > plain.Width*plain.Height/20 {
+		t.Errorf("highlight changed %d pixels of %d", n, plain.Width*plain.Height)
+	}
+	// A range past the text (the file changed) highlights nothing.
+	off, err := s.RenderPDFPage(ctx, Query, PDFPictureRequest{Path: p, Page: 1, MatchStart: 5000, MatchEnd: 5010})
+	if err != nil || differentPixels(t, plain.PNG, off.PNG) != 0 {
+		t.Errorf("range past the text: %v", err)
+	}
+	if _, err := s.RenderPDFPage(ctx, Query, PDFPictureRequest{Path: p, Page: 5}); !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("page past the end: %v, want ErrInvalidInput", err)
+	}
+
 	junk := filepath.Join(dir, "junk.pdf")
 	if err := os.WriteFile(junk, []byte("%PDF-1.4 truncated"), 0o600); err != nil {
 		t.Fatal(err)
@@ -227,4 +261,30 @@ func BenchmarkModelImage(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+}
+
+// differentPixels counts the pixels that differ between two PNGs of the
+// same size.
+func differentPixels(t *testing.T, a, b []byte) int {
+	t.Helper()
+	ia, err := png.Decode(bytes.NewReader(a))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ib, err := png.Decode(bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ia.Bounds() != ib.Bounds() {
+		t.Fatalf("sizes %v and %v", ia.Bounds(), ib.Bounds())
+	}
+	n := 0
+	for y := ia.Bounds().Min.Y; y < ia.Bounds().Max.Y; y++ {
+		for x := ia.Bounds().Min.X; x < ia.Bounds().Max.X; x++ {
+			if ia.At(x, y) != ib.At(x, y) {
+				n++
+			}
+		}
+	}
+	return n
 }

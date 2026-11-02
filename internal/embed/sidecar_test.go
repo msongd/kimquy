@@ -28,7 +28,7 @@ import (
 //	FAKE_DIE      exit 1 after this many embed replies (first launch only)
 //	FAKE_IDLE     exit 0 after this many embed replies
 //	FAKE_HANG     never answer embed_text
-//	FAKE_BAD      dims | nan | count | unnorm | garbage | internal | invalid | silentvec
+//	FAKE_BAD      dims | nan | count | unnorm | garbage | internal | invalid | silentvec | png
 //	FAKE_MODALITIES comma-separated hello modalities (default "text"); media
 //	              ops are served by Fake
 //	FAKE_RENAME   report a different model on relaunch
@@ -122,6 +122,17 @@ func fakeSidecar() {
 					return
 				}
 				send(map[string]any{"id": req.ID, "duration_ms": m.DurationMS, "audio": m.Audio, "video": m.Video})
+				return
+			case "render_pdf_page":
+				pic, err := f.RenderPDFPage(ctx, Query, PDFPictureRequest{req.Path, req.From, req.MatchStart, req.MatchEnd})
+				if err != nil {
+					fail(err)
+					return
+				}
+				if os.Getenv("FAKE_BAD") == "png" {
+					pic.PNG = []byte("not a png")
+				}
+				send(map[string]any{"id": req.ID, "page_count": pic.PageCount, "png": pic.PNG})
 				return
 			case "embed_audio":
 				var v []float32
@@ -393,10 +404,35 @@ func TestStartSidecarRejectsBadHello(t *testing.T) {
 	if err == nil {
 		t.Fatal("started a missing binary")
 	}
-	if _, err := (helloReply{Protocol: 1, Model: "m", Precision: "p", Dims: 256, MaxBatch: 8, Modalities: []string{"image"}}).info(); err == nil {
+	if _, err := (helloReply{Protocol: ProtocolVersion, Model: "m", Precision: "p", Dims: 256, MaxBatch: 8, Modalities: []string{"image"}}).info(); err == nil {
 		t.Fatal("accepted a sidecar without text")
 	}
-	if _, err := (helloReply{Protocol: 2, Model: "m", Precision: "p", Dims: 256, MaxBatch: 8, Modalities: []string{"text"}}).info(); err == nil {
-		t.Fatal("accepted protocol 2")
+	for _, v := range []int{ProtocolVersion - 1, ProtocolVersion + 1} {
+		if _, err := (helloReply{Protocol: v, Model: "m", Precision: "p", Dims: 256, MaxBatch: 8, Modalities: []string{"text"}}).info(); err == nil {
+			t.Fatalf("accepted protocol %d", v)
+		}
+	}
+}
+
+func TestSidecarRenderPDFPage(t *testing.T) {
+	pdf := filepath.Join(t.TempDir(), "a.pdf")
+	if err := os.WriteFile(pdf, []byte("one\ftwo"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	s := startFake(t, "FAKE_MODALITIES=text,image,pdf")
+	pic, err := s.RenderPDFPage(ctx, Query, PDFPictureRequest{Path: pdf, Page: 2, MatchStart: 0, MatchEnd: 3})
+	if err != nil || pic.PageCount != 2 || pic.Width != 100 || pic.Height != 141 {
+		t.Fatalf("%v %d pages %d×%d", err, pic.PageCount, pic.Width, pic.Height)
+	}
+	if _, err := s.RenderPDFPage(ctx, Query, PDFPictureRequest{Path: pdf, Page: 3}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("past the end: %v", err)
+	}
+	if _, err := startFake(t).RenderPDFPage(ctx, Query, PDFPictureRequest{Path: pdf, Page: 1}); err == nil {
+		t.Fatal("rendered without the pdf modality")
+	}
+	bad := startFake(t, "FAKE_MODALITIES=text,image,pdf", "FAKE_BAD=png")
+	if _, err := bad.RenderPDFPage(ctx, Query, PDFPictureRequest{Path: pdf, Page: 1}); !errors.Is(err, ErrFatal) {
+		t.Fatalf("bad png: %v, want ErrFatal", err)
 	}
 }

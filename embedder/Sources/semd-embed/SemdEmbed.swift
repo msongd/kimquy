@@ -9,8 +9,9 @@
 import EmbeddingGemma2
 import Foundation
 import MLX
+import PDFKit
 
-let protocolVersion = 1
+let protocolVersion = 2  // 2: render_pdf_page
 let maxBatch = 32
 let maxTokens = 8192
 let towerIdle: TimeInterval = 120
@@ -75,10 +76,13 @@ struct Request: Decodable, Sendable {
     var startMS: Int? = nil
     var endMS: Int? = nil
     var timesMS: [Int]? = nil
+    var matchStart: Int? = nil
+    var matchEnd: Int? = nil
     enum CodingKeys: String, CodingKey {
         case id, op, priority, texts, path, from, count, render
         case protocolVersion = "protocol"
         case startMS = "start_ms", endMS = "end_ms", timesMS = "times_ms"
+        case matchStart = "match_start", matchEnd = "match_end"
     }
 }
 
@@ -237,6 +241,7 @@ struct Worker: Sendable {
         case "embed_text": return try await embedText(r)
         case "embed_image": return try await embedImage(r)
         case "extract_pdf": return try await extractPDF(r)
+        case "render_pdf_page": return try renderPDFPage(r)
         case "probe_media": return try await probeMedia(r)
         case "embed_audio": return try await embedAudio(r)
         case "embed_frames": return try await embedFrames(r)
@@ -301,6 +306,25 @@ struct Worker: Sendable {
             vectors.append(try await embedImageVector(img, softTokens: frameSoftTokens))
         }
         return ["id": r.id, "vectors": vectors]
+    }
+
+    /// A page for the quick view, the match highlighted. It needs no
+    /// weights: semd offers it with the "pdf" modality.
+    private func renderPDFPage(_ r: Request) throws -> [String: Any] {
+        // semd validates requests: a bad one is its bug.
+        let start = r.matchStart ?? 0, end = r.matchEnd ?? 0
+        guard let path = r.path, path.hasPrefix("/"), let n = r.from, n >= 1, start >= 0, end >= start,
+              end <= maxPDFPageText
+        else { throw Failure.internal("malformed render_pdf_page request") }
+        let doc = try pdfs.open(path)
+        guard n <= doc.pageCount else { throw Failure.invalid("no page \(n) of \(doc.pageCount)") }
+        guard let page = doc.page(at: n - 1) else { throw Failure.invalid("cannot read page \(n)") }
+        var highlight: PDFSelection?
+        if let text = page.string, let range = utf16Range(of: text, start: start, end: end) {
+            highlight = page.selection(for: range)
+        }
+        let png = try renderPagePNG(page, highlight: highlight)
+        return ["id": r.id, "page_count": doc.pageCount, "png": png.base64EncodedString()]
     }
 
     private func extractPDF(_ r: Request) async throws -> [String: Any] {
@@ -426,7 +450,7 @@ struct SemdEmbed {
                         "id": r.id, "protocol": protocolVersion, "model": id, "precision": precision,
                         "dims": opt.dims, "modalities": modalities, "max_batch": maxBatch, "max_tokens": maxTokens,
                     ])
-                case "embed_text", "embed_image", "extract_pdf", "probe_media", "embed_audio", "embed_frames":
+                case "embed_text", "embed_image", "extract_pdf", "render_pdf_page", "probe_media", "embed_audio", "embed_frames":
                     await jobs.push(r)
                 default:
                     out.fail(r.id, "internal", "unknown op \(r.op)")

@@ -75,7 +75,7 @@ testdata/              fixtures + golden vectors
 | POST | `/v1/reindex` | Full rebuild (also required after a precision change) |
 | GET | `/v1/failures` | Files that failed, with reasons (fail loud, visibly) |
 | POST | `/v1/preview` | `{path, locator?}` → the text around the match and the file's details (quick view) |
-| GET | `/v1/thumbnail?path=` | An indexed image, small enough to show (PNG/JPEG/GIF/WebP/BMP as is, else scaled by `sips`) |
+| GET | `/v1/thumbnail?path=&locator=` | An indexed image, small enough to show (PNG/JPEG/GIF/WebP/BMP as is, else scaled by `sips`); or a PDF's page `locator` (page 1 without one) as a PNG with the match highlighted |
 
 `locator` = byte range (text), page number (PDF), or timestamp (audio/video).
 
@@ -128,7 +128,8 @@ testdata/              fixtures + golden vectors
 
 - Protocol: **NDJSON over stdin/stdout**, one request per line with an `id`. Vectors are returned as base64
   float32. Stderr carries logs. Ops: `hello` (model id, precision, dims), `embed_text`,
-  `embed_image`, `embed_audio`, `embed_video`, `extract_pdf`, `status` (thermal/power).
+  `embed_image`, `embed_audio`, `embed_video`, `extract_pdf`, `render_pdf_page` (a page as a PNG
+  for the quick view, protocol 2), `status` (thermal/power).
 - The vendored port supplies text/image/audio encoders. We add: video frame sampling
   (AVAssetImageGenerator), audio resampling to 16 kHz mono (AVAudioConverter), PDF page text and render
   (PDFKit), and the idle-unload logic.
@@ -139,13 +140,14 @@ testdata/              fixtures + golden vectors
 
 ## 6. UI (MyGo)
 
-- One window: search field (debounced), result list (icon by kind, path, snippet/page/timestamp,
+- One window: search field (debounced: 200 ms, 350 ms under 5 letters; under 3 it waits for Enter), result list (icon by kind, path, snippet/page/timestamp,
   score), Enter opens the file, ⌘-Enter reveals it in Finder. Video/audio hits open at their timestamp where possible.
 - Settings sheet: roots add/remove (folder dialog), excludes, pause-on-battery toggle, status
   and failures list.
 - Optional: menu-bar icon and a global shortcut to summon the search window.
-- Quick view (M8): an eye on each result, or ⌘I, opens a side pane with the chosen hit's text
-  scrolled to the match (or the picture of an image), and the file's details below.
+- Quick view (M8): an eye on each result, ⌘I, or Space in the list opens a side pane with the
+  chosen hit's text scrolled to the match (the picture of an image; a PDF's page with the match
+  highlighted, or its text), and the file's details below.
 
 ## 7. Packaging and OS integration
 
@@ -168,7 +170,7 @@ testdata/              fixtures + golden vectors
 | M5 | FSEvents watcher + event-ID replay + CPU/thermal/battery policy | Edits show up in results within 5 s; no full rescan after a restart |
 | M6 | MyGo UI | Search, open/reveal, roots, status |
 | M7 | Packaging: LaunchAgent, TCC flow, signing/notarization, dmg | Clean install on a fresh Mac, works with networking disabled |
-| M8 | Quick view pane: `/v1/preview`, `/v1/thumbnail`, `semctl preview`, side pane in the UI | A hit previews at its match, with its details, for every kind; the pane follows the chosen row and fits the smallest window |
+| M8 | Quick view pane: `/v1/preview`, `/v1/thumbnail`, `semctl preview`, side pane in the UI; PDF page pictures (`render_pdf_page`), Space in the list | A hit previews at its match, with its details, for every kind; a PDF hit shows its page with the match highlighted; the pane follows the chosen row and fits the smallest window |
 
 Note: Go packages for store, catalog, chunker, extractors and the API can be built and tested on any OS
 using the fake embedder. The sidecar, FSEvents and packaging need a Mac.

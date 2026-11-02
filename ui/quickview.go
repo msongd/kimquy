@@ -15,7 +15,9 @@ import (
 
 // The quick view: a pane beside the results that previews the chosen hit,
 // scrolled to the text that matched, with the file's details below. The
-// eye on a row or Cmd-I opens and closes it; it follows the chosen row.
+// eye on a row, Cmd-I, or Space in the list opens and closes it; it
+// follows the chosen row. A PDF shows its page as a picture with the match
+// highlighted, or its text.
 
 const defaultQuickSplit = 52 // percent of the width the results keep
 
@@ -35,8 +37,20 @@ type quickView struct {
 	thumb *ui.Bitmap // an image's picture, decoded
 	// thumbErr says why an image shows no picture.
 	thumbErr string
-	reveal   bool // scroll the match into view in the next frame
+	reveal   bool // scroll the match into view when the text is next drawn
+	// refocus gives the list back the focus it loses when the pane opens
+	// or closes around it, so Space can close what Space opened.
+	refocus bool
+	// view is how a PDF shows: pageView or textView. It is the user's
+	// choice, so it outlives the preview.
+	view int
 }
+
+// The views of a PDF, in the order of the switch's segments.
+const (
+	pageView = iota
+	textView
+)
 
 // toggleQuick opens the quick view on hit i, or closes it if it shows i.
 func (a *app) toggleQuick(i int) {
@@ -64,6 +78,12 @@ func (a *app) quickKey() {
 	}
 }
 
+// spaceKey is Space in the list: Cmd-I, keeping the focus in the list.
+func (a *app) spaceKey() {
+	a.quickKey()
+	a.quick.refocus = true
+}
+
 func (a *app) closeQuick() {
 	a.quick.open = false
 	a.dropPreview()
@@ -76,8 +96,8 @@ func (a *app) dropPreview() {
 		a.quick.stop()
 		a.quick.stop = nil
 	}
-	split, open := a.quick.split, a.quick.open
-	a.quick = quickView{open: open, split: split, seq: a.quick.seq}
+	q := a.quick
+	a.quick = quickView{open: q.open, split: q.split, seq: q.seq, view: q.view, refocus: q.refocus}
 }
 
 // syncQuick loads the preview of the chosen hit when the pane shows
@@ -110,9 +130,13 @@ func (a *app) loadPreview(h client.Hit) {
 			thumb    *ui.Bitmap
 			thumbErr string
 		)
-		if err == nil && p.Kind == "image" {
+		if err == nil && (p.Kind == "image" || p.Kind == "pdf") {
 			// Decoded here, off the main thread: a photo takes a while.
-			data, terr := a.be.Thumbnail(ctx, h.Path)
+			var loc kind.Locator // an image's, or a PDF's first page
+			if p.Kind == "pdf" && h.Locator.Kind == kind.LocPage {
+				loc = h.Locator
+			}
+			data, terr := a.be.Thumbnail(ctx, h.Path, loc)
 			if terr == nil {
 				thumb, terr = ui.DecodeBitmap(data)
 			}
@@ -152,6 +176,12 @@ func (a *app) quickPane(c *ui.Context) {
 			if q.busy {
 				ui.Spinner(c)
 			}
+			if q.key != "" && !q.busy && q.err == "" && q.p.Kind == "pdf" {
+				sw := ui.Segmented(c, &q.view, "Page", "Text").Label("Show the PDF as").Tooltip("The page as it looks, or its text")
+				if sw.Changed() {
+					a.input.Focus() // or ↑↓ would flip the switch, not choose a result
+				}
+			}
 			if ui.Button(c, "Close").Label("Close Quick Look").Tooltip("⌘I").Clicked() {
 				a.closeQuick()
 			}
@@ -183,13 +213,18 @@ func (a *app) quickContent(c *ui.Context) {
 		ui.Text(c, "The file changed since it was indexed: the match may be off.").
 			FontSize(11).TextColor(t.Danger).Wrap().Padding(0, 0, 8, 0)
 	}
+	picture := p.Kind == "image" || p.Kind == "pdf" && a.quick.view == pageView
 	switch {
+	case picture && a.quick.thumb != nil:
+		label := filepath.Base(p.Path)
+		if p.Kind == "pdf" {
+			label = fmt.Sprintf("Page %d of %s", max(p.Locator.Page, 1), label)
+		}
+		ui.Image(c, a.quick.thumb).Fit(ui.ScaleDown).FillWidth().Label(label)
+	case picture:
+		ui.Text(c, a.quick.thumbErr).TextColor(t.TextMuted).Wrap()
 	case p.Text != "":
 		a.quickText(c, p)
-	case p.Kind == "image" && a.quick.thumb != nil:
-		ui.Image(c, a.quick.thumb).Fit(ui.ScaleDown).FillWidth().Label(filepath.Base(p.Path))
-	case p.Kind == "image":
-		ui.Text(c, a.quick.thumbErr).TextColor(t.TextMuted).Wrap()
 	case p.TextError != "":
 		ui.Text(c, "No text to show: "+p.TextError).TextColor(t.TextMuted).Wrap()
 	case p.Kind == "audio" || p.Kind == "video":

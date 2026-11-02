@@ -104,6 +104,14 @@ func (s slowPDF) ExtractPDF(ctx context.Context, p embed.Priority, req embed.PDF
 	return s.Fake.ExtractPDF(ctx, p, req)
 }
 
+func (s slowPDF) RenderPDFPage(ctx context.Context, p embed.Priority, req embed.PDFPictureRequest) (embed.PDFPicture, error) {
+	if p == embed.Query {
+		<-ctx.Done()
+		return embed.PDFPicture{}, ctx.Err()
+	}
+	return s.Fake.RenderPDFPage(ctx, p, req)
+}
+
 func TestSnippetBudget(t *testing.T) {
 	root, state := t.TempDir(), t.TempDir()
 	root, _ = filepath.EvalSymlinks(root)

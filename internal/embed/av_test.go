@@ -42,7 +42,7 @@ func TestAudioRequestValidate(t *testing.T) {
 }
 
 func TestHelloMediaModalities(t *testing.T) {
-	h := helloReply{Protocol: 1, Model: "m", Precision: "p", Dims: 256, MaxBatch: 8,
+	h := helloReply{Protocol: ProtocolVersion, Model: "m", Precision: "p", Dims: 256, MaxBatch: 8,
 		Modalities: []string{"text", "image", "pdf", "video", "audio", "smell"}}
 	i, err := h.info()
 	if err != nil {

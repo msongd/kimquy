@@ -233,11 +233,24 @@ func (c *Client) Preview(ctx context.Context, req PreviewRequest) (Preview, erro
 	return p, nil
 }
 
-// Thumbnail returns the indexed image at path, scaled down if it is big.
-func (c *Client) Thumbnail(ctx context.Context, path string) ([]byte, error) {
+// Thumbnail returns the picture of the indexed image at path, scaled down
+// if it is big (loc none), or of a PDF's page loc with the hit highlighted.
+func (c *Client) Thumbnail(ctx context.Context, path string, loc kind.Locator) ([]byte, error) {
+	if err := loc.Validate(); err != nil {
+		return nil, err
+	}
+	q := url.Values{"path": {path}}
+	if loc.Kind != kind.LocNone {
+		q.Set("locator", loc.String())
+	}
 	var b []byte
-	err := c.do(ctx, http.MethodGet, "/v1/thumbnail?path="+url.QueryEscape(path), nil, &b)
-	return b, err
+	if err := c.do(ctx, http.MethodGet, "/v1/thumbnail?"+q.Encode(), nil, &b); err != nil {
+		return nil, err
+	}
+	if len(b) == 0 {
+		return nil, errors.New("semd: empty thumbnail")
+	}
+	return b, nil
 }
 
 func (c *Client) Status(ctx context.Context) (Status, error) {

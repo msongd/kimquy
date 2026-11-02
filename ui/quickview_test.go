@@ -14,6 +14,7 @@ import (
 	"github.com/egoist/mygo/ui"
 
 	"github.com/msongd/kimquy/internal/client"
+	"github.com/msongd/kimquy/internal/kind"
 )
 
 const pdfText = "Summary\nThe quarterly revenue grew by a fifth.\nCosts held steady.\n"
@@ -31,11 +32,35 @@ func quickHarness(t *testing.T) *harness {
 		talkHit.Path: {Path: talkHit.Path, Kind: "audio", Locator: talkHit.Locator, Size: 900,
 			Duration: 3_800_000, Status: "indexed", Vectors: 7, Stale: true},
 	}
+	h.semd.thumbs = map[string][]byte{pdfHit.Path: pngBytes(t, 100, 141)}
 	h.Type("revenue")
 	h.Advance(debounce)
 	h.flush()
 	h.want("report.pdf")
 	return h
+}
+
+// pngBytes is a white picture, like a blank page.
+func pngBytes(t *testing.T, w, h int) []byte {
+	t.Helper()
+	img := image.NewGray(image.Rect(0, 0, w, h))
+	for i := range img.Pix {
+		img.Pix[i] = 0xff
+	}
+	var b bytes.Buffer
+	if err := png.Encode(&b, img); err != nil {
+		t.Fatal(err)
+	}
+	return b.Bytes()
+}
+
+// textView switches the pane's PDF to its text.
+func (h *harness) textView() {
+	h.t.Helper()
+	h.click("Text")
+	if h.a.quick.view != textView {
+		h.t.Fatal("the switch did not show the text")
+	}
 }
 
 func TestQuickLookFromRow(t *testing.T) {
@@ -56,12 +81,20 @@ func TestQuickLookFromRow(t *testing.T) {
 		h.want(s)
 	}
 
-	// The pane follows the chosen row: the report, scrolled to the match.
+	// The pane follows the chosen row: the report's page 3 as a picture,
+	// then its text scrolled to the match.
 	h.Key(0, ui.KeyUp)
 	h.flush()
 	if n := len(h.semd.previewed); n != 2 || h.semd.previewed[1].Path != pdfHit.Path {
 		t.Fatalf("previewed %v", h.semd.previewed)
 	}
+	if !slices.Equal(h.semd.thumbed, []string{pdfHit.Path + "#page:3"}) || h.a.quick.thumb == nil {
+		t.Fatalf("thumbed %v, picture %v: %s", h.semd.thumbed, h.a.quick.thumb != nil, h.a.quick.thumbErr)
+	}
+	if _, ok := h.Find("Page 3 of report.pdf"); !ok || h.HasText("Costs held steady.") {
+		t.Fatalf("no page picture in %q", h.Texts())
+	}
+	h.textView()
 	for _, s := range []string{"Summary", "quarterly revenue", " grew by a fifth.", "Costs held steady.",
 		"page 3", "2.4 MB", "12", "abababababababab…", "1 Mar 2026 at 09:30", "40"} {
 		h.want(s)
@@ -94,6 +127,7 @@ func TestQuickLookFromRow(t *testing.T) {
 // chosen, whatever order the replies come in.
 func TestQuickLookDropsStale(t *testing.T) {
 	h := quickHarness(t)
+	h.a.quick.view = textView
 	h.Key(ui.Cmd, ui.KeyI)
 	h.Frame()
 	h.Key(0, ui.KeyDown)
@@ -138,11 +172,7 @@ func TestQuickLookImage(t *testing.T) {
 	photo := client.Hit{Path: "/Users/me/Pictures/harbour.png", Kind: "image", Score: .7}
 	h.semd.hits["harbour"] = []client.Hit{photo}
 	h.semd.previews[photo.Path] = client.Preview{Path: photo.Path, Kind: "image", Width: 40, Height: 30, Size: 120}
-	var b bytes.Buffer
-	if err := png.Encode(&b, image.NewGray(image.Rect(0, 0, 40, 30))); err != nil {
-		t.Fatal(err)
-	}
-	h.semd.thumbs = map[string][]byte{photo.Path: b.Bytes()}
+	h.semd.thumbs = map[string][]byte{photo.Path: pngBytes(t, 40, 30)}
 	h.Key(0, ui.KeyEscape)
 	h.Type("harbour")
 	h.Advance(debounce)
@@ -172,7 +202,7 @@ func TestQuickLookFitsSmallWindow(t *testing.T) {
 	if out := os.Getenv("SEMSEARCH_SHOT"); out != "" {
 		h.shot(out + "-quicklook.png")
 	}
-	for _, s := range []string{"Open report.pdf", "Show in Finder", "Close Quick Look", "Quick Look at report.pdf"} {
+	for _, s := range []string{"Open report.pdf", "Show in Finder", "Close Quick Look", "Quick Look at report.pdf", "Page", "Text"} {
 		r, ok := h.Find(s)
 		if !ok || r.X < 0 || r.Y < 0 || r.X+r.W > minWindowW || r.Y+r.H > minWindowH-titleBar {
 			t.Errorf("%q at %+v (found %v)", s, r, ok)
@@ -219,6 +249,7 @@ func TestByteSize(t *testing.T) {
 // The eye of another row while the pane is open shows that row.
 func TestQuickLookSwitchRow(t *testing.T) {
 	h := quickHarness(t)
+	h.a.quick.view = textView
 	h.Key(ui.Cmd, ui.KeyI)
 	h.flush()
 	h.want("Costs held steady.")
@@ -226,5 +257,57 @@ func TestQuickLookSwitchRow(t *testing.T) {
 	h.flush()
 	if !h.a.quick.open || h.a.chosen != 1 || h.a.quick.p.Path != talkHit.Path {
 		t.Fatalf("open %v, chosen %d, shows %s", h.a.quick.open, h.a.chosen, h.a.quick.p.Path)
+	}
+}
+
+// The Page/Text choice holds for the next PDF; a page that cannot be drawn
+// says why, and the text is a click away.
+func TestQuickLookPageView(t *testing.T) {
+	h := quickHarness(t)
+	scan := client.Hit{Path: "/Users/me/Docs/scan.pdf", Kind: "pdf", Score: .5, Locator: kind.Locator{Kind: kind.LocPage, Page: 2}}
+	h.semd.hits["revenue"] = []client.Hit{pdfHit, scan}
+	h.semd.previews[scan.Path] = client.Preview{Path: scan.Path, Kind: "pdf", Locator: scan.Locator, Pages: 2,
+		TextError: "page 2 is a picture: it was searched as an image"}
+	h.Key(0, ui.KeyEscape)
+	h.Type("revenue")
+	h.Advance(debounce)
+	h.flush()
+	h.Key(ui.Cmd, ui.KeyI)
+	h.flush()
+	h.textView()
+	h.want("Costs held steady.")
+	h.Key(0, ui.KeyDown)
+	h.flush()
+	h.want("No text to show: page 2 is a picture")
+	h.click("Page")
+	h.want("No picture: no thumbnail")
+	if want := []string{pdfHit.Path + "#page:3", scan.Path + "#page:2"}; !slices.Equal(h.semd.thumbed, want) {
+		t.Fatalf("thumbed %v, want %v", h.semd.thumbed, want)
+	}
+}
+
+// Space opens and closes the pane from the list, and types in the search
+// field.
+func TestQuickLookSpace(t *testing.T) {
+	h := quickHarness(t)
+	h.semd.hits["revenue "] = h.semd.hits["revenue"]
+	h.Key(0, ui.KeySpace)
+	h.Type(" ")
+	h.Advance(debounce)
+	h.flush()
+	if h.a.quick.open || h.a.query != "revenue " {
+		t.Fatalf("space in the field: open %v, query %q", h.a.quick.open, h.a.query)
+	}
+	h.click("keynote.m4a") // the list takes the focus
+	h.Key(0, ui.KeySpace)
+	h.flush()
+	if !h.a.quick.open || h.a.chosen != 1 {
+		t.Fatalf("open %v, chosen %d", h.a.quick.open, h.a.chosen)
+	}
+	h.want("900 bytes")
+	h.Key(0, ui.KeySpace)
+	h.flush()
+	if h.a.quick.open || h.a.query != "revenue " {
+		t.Fatalf("open %v, query %q", h.a.quick.open, h.a.query)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/egoist/mygo/ui"
 
@@ -22,6 +23,9 @@ import (
 
 const (
 	debounce       = 200 * time.Millisecond // typing pause before a search
+	shortDebounce  = 350 * time.Millisecond // before a short one: people stop mid-word
+	minQuery       = 3                      // weight below which typing does not search; Enter does
+	longQuery      = 5                      // weight from which the pause is debounce
 	statusEvery    = 2 * time.Second        // status poll without the event stream
 	liveEvery      = 30 * time.Second       // with it: a safety net only
 	eventGap       = 250 * time.Millisecond // between status requests events cause
@@ -68,8 +72,9 @@ type backend interface {
 	// Preview is the file of a hit as the quick view shows it: its text
 	// around the match and its details.
 	Preview(context.Context, client.PreviewRequest) (client.Preview, error)
-	// Thumbnail is an image's picture, small enough to show.
-	Thumbnail(ctx context.Context, path string) ([]byte, error)
+	// Thumbnail is an image's picture, small enough to show (loc none), or
+	// a PDF's page loc with the hit highlighted.
+	Thumbnail(ctx context.Context, path string, loc kind.Locator) ([]byte, error)
 	// Events streams semd's events until ctx ends or the connection drops;
 	// the first is "open".
 	Events(context.Context, func(events.Event)) error
@@ -117,13 +122,16 @@ type app struct {
 	// not nil) on the main thread, redrawing after.
 	async func(work func() func())
 
-	query     string
-	kinds     []string // the kinds to search, by name; none for all
-	root      string   // the folder to search; "" for all
-	limit     int      // results at most
-	input     ui.Handle
-	due       time.Time // when to search for query; zero when none is due
-	seq       int       // of the latest search; older replies are dropped
+	query string
+	kinds []string // the kinds to search, by name; none for all
+	root  string   // the folder to search; "" for all
+	limit int      // results at most
+	input ui.Handle
+	due   time.Time // when to search for query; zero when none is due
+	// short: the query is too short to search as one types; Enter
+	// searches it.
+	short     bool
+	seq       int // of the latest search; older replies are dropped
 	searching bool
 	stop      context.CancelFunc // ends the search in flight; nil when none
 	hits      []client.Hit
@@ -217,7 +225,7 @@ func (a *app) view(c *ui.Context) {
 			a.choose(a.chosen - 1)
 		}
 		if c.Shortcut(0, ui.KeyEnter) {
-			a.open(false)
+			a.enter()
 		}
 		if c.Shortcut(ui.Cmd, ui.KeyEnter) {
 			a.open(true)
@@ -239,7 +247,7 @@ func (a *app) view(c *ui.Context) {
 				a.queryChanged(now)
 			}
 			if in.Submitted() { // the input takes Enter from Shortcut
-				a.open(false)
+				a.enter()
 			}
 			if a.searching {
 				ui.Spinner(c)
@@ -266,6 +274,12 @@ func (a *app) view(c *ui.Context) {
 			if list.Submitted() {
 				a.open(false)
 			}
+			// Space, as in Finder, but only from the list: in the search
+			// field it types a space.
+			list.OnShortcut(0, ui.KeySpace, a.spaceKey)
+			if a.quick.refocus && a.list.Focus(c) {
+				a.quick.refocus = false
+			}
 		}
 		if a.quick.open {
 			ui.SplitPercent(c, &a.quick.split, results, func() { a.quickPane(c) }).Grow(1)
@@ -275,7 +289,7 @@ func (a *app) view(c *ui.Context) {
 		ui.Divider(c)
 		ui.Row(c).Padding(8, 16).Gap(16).Children(func() {
 			ui.Text(c, a.statusLine()).FontSize(11).TextColor(t.TextMuted).Grow(1).SingleLine()
-			ui.Text(c, "↑↓ Choose   ↵ Open   ⌘↵ Show in Finder   ⌘I Quick Look").FontSize(11).TextColor(t.TextMuted)
+			ui.Text(c, "↑↓ Choose   ↵ Open   ⌘↵ Show in Finder   ⌘I or Space Quick Look").FontSize(11).TextColor(t.TextMuted)
 		})
 	})
 	if a.settingsOpen {
@@ -401,14 +415,50 @@ func (a *app) streamEvents(ctx context.Context, post func(func())) {
 }
 
 // queryChanged drops the results, which no longer answer the query, and
-// searches again after the typing pause.
+// searches again after the typing pause: a longer one for a short query,
+// and none for one too short to mean much, which waits for Enter.
 func (a *app) queryChanged(now time.Time) {
 	a.dropSearch()
-	if strings.TrimSpace(a.query) == "" {
-		a.due = time.Time{}
+	q := strings.TrimSpace(a.query)
+	a.due, a.short = time.Time{}, false
+	switch w := queryWeight(q); {
+	case q == "":
+	case w < minQuery:
+		a.short = true
+	case w < longQuery:
+		a.due = now.Add(shortDebounce)
+	default:
+		a.due = now.Add(debounce)
+	}
+}
+
+// queryWeight is how much a query says, for search-as-you-type: its
+// letters and digits, with a CJK character (a word, or most of one)
+// counting as minQuery.
+func queryWeight(q string) int {
+	n := 0
+	for _, r := range q {
+		switch {
+		case unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Hangul):
+			n += minQuery
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			n++
+		}
+	}
+	return n
+}
+
+// enter opens the chosen result or, with none, searches the query now:
+// one too short to search as one types, or before the typing pause ends.
+func (a *app) enter() {
+	if len(a.hits) > 0 {
+		a.open(false)
 		return
 	}
-	a.due = now.Add(debounce)
+	if q := strings.TrimSpace(a.query); q != "" && !a.searching {
+		a.due = time.Time{}
+		a.search(q)
+	}
 }
 
 // dropSearch ends the search in flight, if any, and clears the results.
@@ -426,6 +476,7 @@ func (a *app) search(q string) {
 		return
 	}
 	a.dropSearch()
+	a.short = false
 	seq := a.seq
 	req := a.searchRequest(q)
 	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
@@ -527,6 +578,8 @@ func (a *app) emptyText() string {
 	switch {
 	case strings.TrimSpace(a.query) == "":
 		return "Type to search the contents of your files."
+	case a.short:
+		return fmt.Sprintf("Type at least %d characters, or press ↵ to search.", minQuery)
 	case a.searching || !a.due.IsZero():
 		return "Searching…"
 	case a.searchErr != "":

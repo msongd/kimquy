@@ -19,9 +19,10 @@ what lies at the bottom of the lake.
   - PDFs: text per page, with pages that are scanned images embedded as
     images.
   - Audio, and video as both keyframes and sound.
-- **Quick view.** The eye on a result, or ⌘I, opens a side pane with the
-  file's text scrolled to the match (or the picture), and its size, dates
-  and pages or duration below.
+- **Quick view.** The eye on a result, ⌘I, or Space in the list opens a
+  side pane with the file's text scrolled to the match, the picture of an
+  image, or a PDF's page with the match highlighted. Its size, dates and
+  pages or duration are below.
 - **Kept up to date.** FSEvents tracks changes, and indexing pauses on
   battery and under load.
 - **Native and light.**

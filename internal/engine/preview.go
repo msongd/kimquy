@@ -44,6 +44,9 @@ var (
 	// ErrBadPreview is a preview or thumbnail request that cannot be met
 	// whatever the state of the file.
 	ErrBadPreview = errors.New("bad preview request")
+	// ErrBusy: the embedder, busy indexing, did not get to a quick view
+	// request within previewBudget.
+	ErrBusy = errors.New("the embedder is busy indexing; try again")
 )
 
 // Preview is what the quick view shows of an indexed file: its details,
@@ -169,7 +172,7 @@ func (e *Engine) previewPDF(ctx context.Context, f catalog.File, loc kind.Locato
 	res, err := e.media.ExtractPDF(ctx, embed.Query, embed.PDFRequest{Path: f.Path, From: page, Count: 1})
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
-		p.TextError = "the embedder is busy indexing; try again"
+		p.TextError = ErrBusy.Error()
 		return
 	case err != nil:
 		p.TextError = "cannot read the page: " + err.Error()
@@ -256,20 +259,34 @@ func imageSize(path string) (w, h int) {
 	return c.Width, c.Height
 }
 
-// Thumbnail returns the indexed image at path for the quick view: as it
-// is when it is small and in a format the UI decodes (PNG, JPEG, GIF,
-// WebP, BMP), otherwise scaled down to a JPEG by macOS's sips, which reads
-// every format semd indexes (HEIC, TIFF…).
-func (e *Engine) Thumbnail(ctx context.Context, path string) (data []byte, contentType string, err error) {
+// Thumbnail returns the picture of an indexed image or PDF page for the
+// quick view. An image comes as it is when it is small and in a format the
+// UI decodes (PNG, JPEG, GIF, WebP, BMP), otherwise scaled down to a JPEG
+// by macOS's sips, which reads every format semd indexes (HEIC, TIFF…); loc
+// must be none. A PDF's page loc.Page (page 1 for none) is rendered as a
+// PNG by the embedder, with the hit's byte range in the page's text
+// highlighted.
+func (e *Engine) Thumbnail(ctx context.Context, path string, loc kind.Locator) (data []byte, contentType string, err error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return nil, "", fmt.Errorf("%w: path %q must be absolute and clean", ErrBadPreview, path)
+	}
+	if err := loc.Validate(); err != nil {
+		return nil, "", fmt.Errorf("%w: %w", ErrBadPreview, err)
 	}
 	f, ok := e.cat.Lookup(path)
 	if !ok {
 		return nil, "", fmt.Errorf("%w: %s", ErrNotIndexed, path)
 	}
-	if f.Kind != kind.Image {
-		return nil, "", fmt.Errorf("%w: %s is not an image", ErrBadPreview, path)
+	switch {
+	case f.Kind == kind.PDF:
+		if err := locatorFits(f.Kind, loc); err != nil {
+			return nil, "", err
+		}
+		return e.pageThumb(ctx, path, loc)
+	case f.Kind != kind.Image:
+		return nil, "", fmt.Errorf("%w: %s is neither an image nor a PDF", ErrBadPreview, path)
+	case loc.Kind != kind.LocNone:
+		return nil, "", fmt.Errorf("%w: locator %s does not fit an image", ErrBadPreview, loc)
 	}
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -290,6 +307,30 @@ func (e *Engine) Thumbnail(ctx context.Context, path string) (data []byte, conte
 		}
 	}
 	return sipsThumb(ctx, path)
+}
+
+// pageThumb renders a PDF page with the hit highlighted. A page searched
+// as an image (no range) is drawn without a highlight.
+func (e *Engine) pageThumb(ctx context.Context, path string, loc kind.Locator) ([]byte, string, error) {
+	if e.media == nil {
+		return nil, "", errors.New("this semd reads no PDFs")
+	}
+	req := embed.PDFPictureRequest{Path: path, Page: max(int(loc.Page), 1)}
+	if loc.Kind == kind.LocPage && loc.End > loc.Start && loc.End <= embed.MaxPDFPageText {
+		req.MatchStart, req.MatchEnd = int(loc.Start), int(loc.End)
+	}
+	bctx, cancel := context.WithTimeout(ctx, previewBudget)
+	defer cancel()
+	pic, err := e.media.RenderPDFPage(bctx, embed.Query, req)
+	switch {
+	case ctx.Err() != nil:
+		return nil, "", ctx.Err()
+	case errors.Is(err, context.DeadlineExceeded):
+		return nil, "", ErrBusy
+	case err != nil:
+		return nil, "", fmt.Errorf("render page %d of %s: %w", req.Page, path, err)
+	}
+	return pic.PNG, "image/png", nil
 }
 
 var rawTypes = map[string]string{

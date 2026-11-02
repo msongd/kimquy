@@ -178,6 +178,20 @@ func TestPreviewBudget(t *testing.T) {
 	if err != nil || !strings.Contains(p.TextError, "busy") || p.Size == 0 {
 		t.Fatalf("%v %+v", err, p)
 	}
+	if _, _, err := h.e.Thumbnail(context.Background(), pdf, kind.Locator{Kind: kind.LocPage, Page: 1}); !errors.Is(err, ErrBusy) {
+		t.Fatalf("page picture: %v", err)
+	}
+}
+
+// pictureSpy records the page pictures asked of the fake embedder.
+type pictureSpy struct {
+	*embed.Fake
+	reqs *[]embed.PDFPictureRequest
+}
+
+func (s pictureSpy) RenderPDFPage(ctx context.Context, p embed.Priority, req embed.PDFPictureRequest) (embed.PDFPicture, error) {
+	*s.reqs = append(*s.reqs, req)
+	return s.Fake.RenderPDFPage(ctx, p, req)
 }
 
 func TestThumbnail(t *testing.T) {
@@ -191,6 +205,8 @@ func TestThumbnail(t *testing.T) {
 	write(t, heic, "not really a heic")
 	text := filepath.Join(root, "a.txt")
 	write(t, text, "some words to index")
+	pdf := filepath.Join(root, "atlas.pdf")
+	write(t, pdf, "Rivers cut V-shaped valleys into the hills.\fGlaciers carve U-shaped valleys instead.")
 
 	// A stand-in for sips: writes "scaled" to the path after --out.
 	bin := t.TempDir()
@@ -202,7 +218,8 @@ func TestThumbnail(t *testing.T) {
 	sips = fake
 	defer func() { sips = old }()
 
-	h := start(t, state, root, &embed.Fake{Dims: 768})
+	var asked []embed.PDFPictureRequest
+	h := start(t, state, root, pictureSpy{&embed.Fake{Dims: 768}, &asked})
 	defer h.stop()
 	if _, err := h.e.SetRoots([]string{root}, nil); err != nil {
 		t.Fatal(err)
@@ -210,23 +227,56 @@ func TestThumbnail(t *testing.T) {
 	h.idle()
 	ctx := context.Background()
 
+	// A PDF page: the hit's page and range go to the embedder; a page
+	// searched as an image (no range), or no locator, highlight nothing.
+	for _, tc := range []struct {
+		loc  kind.Locator
+		want embed.PDFPictureRequest
+	}{
+		{kind.Locator{Kind: kind.LocPage, Page: 2, Start: 9, End: 25}, embed.PDFPictureRequest{Path: pdf, Page: 2, MatchStart: 9, MatchEnd: 25}},
+		{kind.Locator{Kind: kind.LocPage, Page: 2}, embed.PDFPictureRequest{Path: pdf, Page: 2}},
+		{kind.Locator{}, embed.PDFPictureRequest{Path: pdf, Page: 1}},
+	} {
+		asked = nil
+		data, typ, err := h.e.Thumbnail(ctx, pdf, tc.loc)
+		if err != nil || typ != "image/png" || len(asked) != 1 || asked[0] != tc.want {
+			t.Fatalf("%s: %v %s %+v", tc.loc, err, typ, asked)
+		}
+		if c, err := png.DecodeConfig(bytes.NewReader(data)); err != nil || c.Width != 100 {
+			t.Fatalf("%s: %v %+v", tc.loc, err, c)
+		}
+	}
+	if _, _, err := h.e.Thumbnail(ctx, pdf, kind.Locator{Kind: kind.LocPage, Page: 3}); !errors.Is(err, embed.ErrInvalidInput) {
+		t.Fatalf("page past the end: %v", err)
+	}
+	for _, tc := range []struct {
+		path string
+		loc  kind.Locator
+	}{
+		{pdf, kind.Locator{Kind: kind.LocBytes, Start: 0, End: 4}},
+		{small, kind.Locator{Kind: kind.LocPage, Page: 1}},
+		{text, kind.Locator{}},
+		{small, kind.Locator{Kind: kind.LocPage}}, // page 0: invalid
+	} {
+		if _, _, err := h.e.Thumbnail(ctx, tc.path, tc.loc); !errors.Is(err, ErrBadPreview) {
+			t.Errorf("%s %s: %v", filepath.Base(tc.path), tc.loc, err)
+		}
+	}
+
 	want, _ := os.ReadFile(small)
-	if data, typ, err := h.e.Thumbnail(ctx, small); err != nil || typ != "image/png" || !bytes.Equal(data, want) {
+	if data, typ, err := h.e.Thumbnail(ctx, small, kind.Locator{}); err != nil || typ != "image/png" || !bytes.Equal(data, want) {
 		t.Fatalf("small: %v %s %d bytes", err, typ, len(data))
 	}
 	for _, p := range []string{wide, heic} {
-		if data, typ, err := h.e.Thumbnail(ctx, p); err != nil || typ != "image/jpeg" || string(data) != "scaled" {
+		if data, typ, err := h.e.Thumbnail(ctx, p, kind.Locator{}); err != nil || typ != "image/jpeg" || string(data) != "scaled" {
 			t.Fatalf("%s: %v %s %q", filepath.Base(p), err, typ, data)
 		}
 	}
 	sips = filepath.Join(bin, "missing")
-	if _, _, err := h.e.Thumbnail(ctx, heic); err == nil || !strings.Contains(err.Error(), "sips") {
+	if _, _, err := h.e.Thumbnail(ctx, heic, kind.Locator{}); err == nil || !strings.Contains(err.Error(), "sips") {
 		t.Fatalf("no sips: %v", err)
 	}
-	if _, _, err := h.e.Thumbnail(ctx, text); !errors.Is(err, ErrBadPreview) {
-		t.Fatalf("text file: %v", err)
-	}
-	if _, _, err := h.e.Thumbnail(ctx, filepath.Join(root, "nope.png")); !errors.Is(err, ErrNotIndexed) {
+	if _, _, err := h.e.Thumbnail(ctx, filepath.Join(root, "nope.png"), kind.Locator{}); !errors.Is(err, ErrNotIndexed) {
 		t.Fatalf("not indexed: %v", err)
 	}
 }
