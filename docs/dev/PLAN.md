@@ -7,11 +7,11 @@ Google **EmbeddingGemma 2** (`google/embeddinggemma-2`, released 2026-10-06).
 
 | Topic | Decision |
 |---|---|
-| Platform | **macOS 14+, Apple Silicon only** (MLX requirement). Linux / Intel dropped. |
+| Platform | **macOS 14+, Apple Silicon only** (GPU inference through Metal). Linux / Intel dropped. |
 | Model | EmbeddingGemma 2: text 270M + vision 170M + audio 300M, shared 768-d space, 8K ctx |
-| Inference | **Swift sidecar `semd-embed`** on **MLX Swift** (Metal GPU, so low CPU) |
-| Model code | **Vendor** [EmbeddingGemma2Swift](https://github.com/Obscyra-app/EmbeddingGemma2Swift) (MIT), pinned, and guarded by golden-vector tests |
-| Precision | **8-bit** text/vision + **bf16** audio (the port's validated profile). q4 is opt-in only if it passes our retrieval eval. Changing precision forces a full reindex. |
+| Inference | **Swift sidecar `semd-embed`** on the **LiteRT-LM** C API (GPU, so low CPU). MLX Swift until the LiteRT-LM switch (see LITERT-RESULTS.md). |
+| Model code | Google's `.litertlm` build (litert-community), pinned by revision and SHA-256, guarded by the retrieval eval. Formerly the vendored EmbeddingGemma2Swift. |
+| Precision | **int4**, as Google ships it for LiteRT-LM; it matches the 8-bit MLX baseline on our retrieval eval. Changing the model forces a full reindex. |
 | Media decoding | macOS frameworks only: **ImageIO** (all image formats incl. HEIC/WebP), **AVFoundation** (audio/video), **PDFKit** (PDF text + page render). No ffmpeg. |
 | PDF | Text per page. Pages with little or no text are rendered to an image and embedded with the vision encoder. |
 | Video | **Per-segment vectors**: ≤32 uniformly sampled keyframes at the 70-token vision budget (each with a timestamp), plus audio in 30 s segments for the first 5 min |
@@ -28,7 +28,7 @@ SemSearch.app
 ├── Contents/MacOS/SemSearch          MyGo UI (pure Go, no cgo)
 └── Contents/Helpers/
     ├── semd                          core daemon (Go + small cgo for FSEvents)
-    └── semd-embed                    Swift: MLX model + ImageIO/AVFoundation/PDFKit
+    └── semd-embed                    Swift: LiteRT-LM model + ImageIO/AVFoundation/PDFKit
 
  UI ──HTTP/JSON over Unix socket──▶ semd ──NDJSON over stdin/stdout──▶ semd-embed
      ~/Library/Application Support/SemSearch/semd.sock (0600)
@@ -114,7 +114,7 @@ testdata/              fixtures + golden vectors
 
 ### 4.4 CPU policy ("just enough")
 
-- The heavy work runs on the GPU (MLX). Go-side work (hashing, extraction) runs on **1 worker by default**
+- The heavy work runs on the GPU (LiteRT-LM). Go-side work (hashing, extraction) runs on **1 worker by default**
   (configurable), with the process niced.
 - The sidecar runs index requests at **utility/background QoS** and queries at **userInitiated**. A pending query
   preempts the index queue.
@@ -156,7 +156,7 @@ testdata/              fixtures + golden vectors
 - **Model weights are bundled** in the app/dmg, so search works fully offline from install. They're about 1 GB, to be confirmed in M0.
 - **TCC / privacy**: indexing `~/Documents`, `~/Desktop`, `~/Downloads`, iCloud Drive and external volumes needs
   user consent. The UI guides the user through granting access, and the daemon reports `EPERM` roots loudly in `/status`.
-- Code signing + notarization (the MLX `metallib` must be included and signed).
+- Code signing + notarization (`libCLiteRTLM_mac.dylib` in Contents/Frameworks is signed first, by the same team).
 
 ## 8. Milestones
 

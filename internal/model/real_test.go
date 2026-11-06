@@ -8,8 +8,8 @@ import (
 	"testing"
 )
 
-// TestRealDownload fetches text-q8 from Hugging Face into
-// $KIMQUY_REAL_DOWNLOAD/models (320 MB), stopping part way once and
+// TestRealDownload fetches the model from Hugging Face into
+// $KIMQUY_REAL_DOWNLOAD/models (485 MB), stopping part way once and
 // resuming. It is skipped unless that is set.
 func TestRealDownload(t *testing.T) {
 	root := os.Getenv("KIMQUY_REAL_DOWNLOAD")

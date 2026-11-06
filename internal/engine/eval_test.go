@@ -22,8 +22,8 @@ import (
 // through the whole pipeline, run its queries and compare the scores with
 // testdata/eval/baseline.json. Runs only with the model available:
 //
-//	SEMD_EMBED_BIN=embedder/.build-xcode/Build/Products/Release/semd-embed \
-//	SEMD_MODEL=models/release go test ./internal/engine -run Eval -v
+//	SEMD_EMBED_BIN=embedder/.build/out/Products/Release/semd-embed \
+//	SEMD_MODEL=models/dev go test ./internal/engine -run Eval -v
 //
 // SEMD_EVAL_UPDATE=1 rewrites the baseline instead of comparing.
 
@@ -169,7 +169,8 @@ func startEvalSidecar(t *testing.T) *embed.Sidecar {
 	defer cancel()
 	s, err := embed.StartSidecar(ctx, embed.SidecarConfig{
 		Path: abs(bin),
-		Args: []string{"--model", abs(model), "--dims", strconv.Itoa(StoreDim)},
+		Args: []string{"--model", abs(model), "--dims", strconv.Itoa(StoreDim),
+			"--cache", filepath.Join(os.TempDir(), "semd-embed-test-cache")},
 	})
 	if err != nil {
 		t.Fatal(err)

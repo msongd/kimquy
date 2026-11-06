@@ -1,12 +1,11 @@
 // swift-tools-version: 6.3
-// semd-embed: the embedding sidecar for semd. Build with Xcode (xcodebuild)
-// so the MLX Metal shaders are compiled and bundled:
+// semd-embed: the embedding sidecar for semd, running EmbeddingGemma 2
+// through the LiteRT-LM C API.
 //
-//   xcodebuild -scheme semd-embed -configuration Release \
-//     -destination 'platform=macOS,arch=arm64' -derivedDataPath .build-xcode \
-//     CLANG_ENABLE_CODE_COVERAGE=NO CLANG_COVERAGE_MAPPING=NO SWIFT_ENABLE_CODE_COVERAGE=NO build
+//   swift build -c release --arch arm64
 //
-// Without the coverage overrides the generated scheme instruments Release too.
+// The executable loads @rpath/libCLiteRTLM_mac.dylib: next to it in a
+// build (@loader_path), from Contents/Frameworks in the app.
 import PackageDescription
 
 let package = Package(
@@ -15,26 +14,20 @@ let package = Package(
     products: [
         .executable(name: "semd-embed", targets: ["semd-embed"])
     ],
-    dependencies: [
-        // Exact pins, matching the vendored port's validated versions.
-        .package(url: "https://github.com/ml-explore/mlx-swift", exact: "0.32.3"),
-        .package(url: "https://github.com/huggingface/swift-transformers", exact: "1.3.0"),
-    ],
     targets: [
-        .target(
-            name: "EmbeddingGemma2",
-            dependencies: [
-                .product(name: "MLX", package: "mlx-swift"),
-                .product(name: "MLXNN", package: "mlx-swift"),
-                .product(name: "Tokenizers", package: "swift-transformers"),
-            ],
-            path: "Vendor/EmbeddingGemma2Swift/EmbeddingGemma2"),
+        // LiteRT-LM v0.19.0 (Apache-2.0), pinned by the archive's sha256.
+        .binaryTarget(
+            name: "CLiteRTLM",
+            url: "https://github.com/google-ai-edge/LiteRT-LM/releases/download/v0.19.0/CLiteRTLM_mac.xcframework.zip",
+            checksum: "1a9e283a99a119aefe21afda541a5308a7d88aa9cb12f58aa7974038e3369c7c"),
         .executableTarget(
             name: "semd-embed",
-            dependencies: ["EmbeddingGemma2", .product(name: "MLX", package: "mlx-swift")],
-            path: "Sources/semd-embed"),
-        .testTarget(
-            name: "EmbeddingGemma2Tests",
-            dependencies: ["EmbeddingGemma2"],
-            path: "Vendor/EmbeddingGemma2Swift/Tests/EmbeddingGemma2Tests"),
+            dependencies: ["CLiteRTLM"],
+            path: "Sources/semd-embed",
+            linkerSettings: [
+                .unsafeFlags([
+                    "-Xlinker", "-rpath", "-Xlinker", "@loader_path",
+                    "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks",
+                ])
+            ]),
     ])

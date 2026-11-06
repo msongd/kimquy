@@ -4,7 +4,6 @@
 
 import AVFoundation
 import CoreGraphics
-import EmbeddingGemma2
 import Foundation
 
 let maxAudioWindowMS = 30_000
@@ -130,7 +129,7 @@ func rms(_ s: [Float]) -> Float {
 }
 
 /// Grabs the video frames nearest the given times, display-oriented.
-func loadFrames(_ path: String, timesMS: [Int]) async throws -> [RGBImage] {
+func loadFrames(_ path: String, timesMS: [Int]) async throws -> [CGImage] {
     let asset = try await openAsset(path)
     let tracks: [AVAssetTrack]
     do {
@@ -145,7 +144,7 @@ func loadFrames(_ path: String, timesMS: [Int]) async throws -> [RGBImage] {
     let tol = CMTime(value: CMTimeValue(frameToleranceMS), timescale: 1000)
     gen.requestedTimeToleranceBefore = tol
     gen.requestedTimeToleranceAfter = tol
-    var images: [RGBImage] = []
+    var images: [CGImage] = []
     for t in timesMS {
         let img: CGImage
         do {

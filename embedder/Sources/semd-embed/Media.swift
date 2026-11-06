@@ -2,7 +2,6 @@
 // limits mirror internal/embed/media.go.
 
 import CoreGraphics
-import EmbeddingGemma2
 import Foundation
 import ImageIO
 import PDFKit
@@ -10,15 +9,15 @@ import PDFKit
 let maxPDFPagesPerCall = 8
 let maxPDFPageText = 512 << 10
 let pdfRenderMinChars = 32
-/// Vision budget per image: the encoder's largest, ~800×800 pixels.
-let imageSoftTokens = 280
+/// Vision budget per image: the larger of the two the model takes (70, 140).
+let imageSoftTokens = 140
 /// Vision budget per video frame: the encoder's smallest that keeps the
 /// scene recognizable, so 32 frames cost about as much as 8 photos.
 let frameSoftTokens = 70
-/// Images are decoded straight to this longest side; the encoder's exact
-/// (slow, Pillow-compatible) resize then only has a small step left.
-let decodeMaxSide = 2048
-/// Rendered PDF pages get this longest side.
+/// Images and PDF pages are decoded straight to this longest side, already
+/// more than 140 soft tokens see; LiteRT resizes from there.
+let decodeMaxSide = 1024
+/// Pages for the quick view get this longest side.
 let pdfRenderMaxSide = 1536
 /// Larger images are refused before decoding: a decompression bomb guard.
 let maxSourcePixels = 200_000_000
@@ -42,38 +41,28 @@ func tooLittleText(_ s: String) -> Bool {
     return true
 }
 
-/// Draws into an opaque white sRGB canvas and returns its RGB pixels, so
-/// transparency ends up flattened onto white.
-func bitmap(width w: Int, height h: Int, draw: (CGContext) -> Void) throws -> RGBImage {
+/// Draws into an opaque white sRGB canvas, so transparency ends up
+/// flattened onto white.
+func bitmap(width w: Int, height h: Int, draw: (CGContext) -> Void) throws -> CGImage {
     guard w > 0, h > 0, w <= 20000, h <= 20000, w * h <= 40_000_000 else {
         throw Failure.invalid("bitmap \(w)×\(h) out of range")
     }
     guard let srgb = CGColorSpace(name: CGColorSpace.sRGB) else { throw Failure.internal("no sRGB color space") }
-    var rgba = [UInt8](repeating: 0, count: w * h * 4)
-    let ok = rgba.withUnsafeMutableBytes { p -> Bool in
-        guard let ctx = CGContext(
-            data: p.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
-            space: srgb, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-        else { return false }
-        ctx.setFillColor(red: 1, green: 1, blue: 1, alpha: 1)
-        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
-        ctx.interpolationQuality = .high
-        draw(ctx)
-        return true
-    }
-    guard ok else { throw Failure.invalid("cannot allocate a \(w)×\(h) bitmap") }
-    var rgb = [UInt8](repeating: 0, count: w * h * 3)
-    for i in 0..<(w * h) {
-        rgb[i * 3] = rgba[i * 4]
-        rgb[i * 3 + 1] = rgba[i * 4 + 1]
-        rgb[i * 3 + 2] = rgba[i * 4 + 2]
-    }
-    return try RGBImage(width: w, height: h, bytes: rgb)
+    guard let ctx = CGContext(
+        data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+        space: srgb, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+    else { throw Failure.invalid("cannot allocate a \(w)×\(h) bitmap") }
+    ctx.setFillColor(red: 1, green: 1, blue: 1, alpha: 1)
+    ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+    ctx.interpolationQuality = .high
+    draw(ctx)
+    guard let img = ctx.makeImage() else { throw Failure.internal("cannot finish a \(w)×\(h) bitmap") }
+    return img
 }
 
 /// Decodes the primary image of a file (JPEG, HEIC, PNG, …) with its EXIF
 /// orientation applied, downsampled to decodeMaxSide.
-func loadImage(_ path: String) throws -> RGBImage {
+func loadImage(_ path: String) throws -> CGImage {
     let noCache = [kCGImageSourceShouldCache: false] as CFDictionary
     guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, noCache),
           CGImageSourceGetCount(src) >= 1
@@ -99,13 +88,13 @@ func loadImage(_ path: String) throws -> RGBImage {
     return try bitmap(width: img.width, height: img.height) { $0.draw(img, in: rect) }
 }
 
-/// Renders a page's crop box, honoring its rotation, at pdfRenderMaxSide.
-func renderPage(_ page: CGPDFPage) throws -> RGBImage {
+/// Renders a page's crop box, honoring its rotation, at decodeMaxSide.
+func renderPage(_ page: CGPDFPage) throws -> CGImage {
     let box = page.getBoxRect(.cropBox)
     let quarter = (Int(page.rotationAngle) % 360 + 360) % 180 != 0
     let pw = quarter ? box.height : box.width, ph = quarter ? box.width : box.height
     guard pw >= 1, ph >= 1 else { throw Failure.invalid("page has an empty crop box") }
-    let scale = CGFloat(pdfRenderMaxSide) / max(pw, ph)
+    let scale = CGFloat(decodeMaxSide) / max(pw, ph)
     let w = max(1, Int((pw * scale).rounded())), h = max(1, Int((ph * scale).rounded()))
     // getDrawingTransform never scales up, so map at 1:1 and scale ourselves.
     let t = page.getDrawingTransform(.cropBox, rect: CGRect(x: 0, y: 0, width: pw, height: ph), rotate: 0, preserveAspectRatio: true)
@@ -214,39 +203,5 @@ final class PDFCache: @unchecked Sendable {
     func drop() {
         key = nil
         doc = nil
-    }
-}
-
-/// An encoder tower (vision or audio), loaded on first use and unloaded
-/// when idle. Used by the worker only, so loading never races with encoding.
-final class Tower: @unchecked Sendable {
-    let name: String
-    private let load: @Sendable () async throws -> Void
-    private let drop: @Sendable () async -> Void
-    private var loaded = false
-
-    init(name: String, load: @escaping @Sendable () async throws -> Void, drop: @escaping @Sendable () async -> Void) {
-        self.name = name
-        self.load = load
-        self.drop = drop
-    }
-
-    func ensure() async {
-        guard !loaded else { return }
-        let t0 = Date()
-        do {
-            try await load()
-        } catch {
-            die("load \(name) weights: \(error)")  // they passed the startup check: broken install
-        }
-        loaded = true
-        log(String(format: "%@ loaded in %.2fs", name, Date().timeIntervalSince(t0)))
-    }
-
-    func unload() async {
-        guard loaded else { return }
-        await drop()
-        loaded = false
-        log("\(name) unloaded (idle)")
     }
 }

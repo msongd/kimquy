@@ -14,8 +14,10 @@ import (
 // Tests against the real model. They need a built semd-embed and the
 // downloaded weights, so they run only when both are named:
 //
-//	SEMD_EMBED_BIN=embedder/.build-xcode/Build/Products/Release/semd-embed \
-//	SEMD_MODEL=models/release go test ./internal/embed -run Model -bench Model -v
+//	SEMD_EMBED_BIN=embedder/.build/out/Products/Release/semd-embed \
+//	SEMD_MODEL=models/dev go test ./internal/embed -run Model -bench Model -v
+//
+// SEMD_MODEL is a model directory: it holds litert/ (internal/model.Parts).
 
 const modelDims = 256 // engine.StoreDim; the sidecar truncates and re-normalizes
 
@@ -41,7 +43,9 @@ func startModel(tb testing.TB) *Sidecar {
 	t0 := time.Now()
 	s, err := StartSidecar(ctx, SidecarConfig{
 		Path: abs(bin),
-		Args: []string{"--model", abs(model), "--dims", fmt.Sprint(modelDims)},
+		Args: []string{"--model", abs(model), "--dims", fmt.Sprint(modelDims),
+			// Compiled GPU programs, kept across runs as semd keeps them.
+			"--cache", filepath.Join(os.TempDir(), "semd-embed-test-cache")},
 	})
 	if err != nil {
 		tb.Fatal(err)

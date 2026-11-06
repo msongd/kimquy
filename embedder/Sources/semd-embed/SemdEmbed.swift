@@ -1,23 +1,17 @@
 // semd-embed: stateless embedding sidecar for semd.
 //
 // Speaks the NDJSON protocol specified in internal/embed/sidecar.go on
-// stdin/stdout; logs go to stderr. One model, one serial worker: queries are
-// taken before queued index work. The vision and audio towers load on first
-// use and unload after towerIdle. Exits on stdin EOF, and with status 0
-// after an idle period (semd restarts it on demand).
+// stdin/stdout; logs go to stderr. One model (EmbeddingGemma 2 on LiteRT-LM,
+// see Engine.swift), one serial worker: queries are taken before queued
+// index work. Exits on stdin EOF, and with status 0 after an idle period
+// (semd restarts it on demand).
 
-import EmbeddingGemma2
 import Foundation
-import MLX
 import PDFKit
 
 let protocolVersion = 2  // 2: render_pdf_page
 let maxBatch = 32
 let maxTokens = 8192
-let towerIdle: TimeInterval = 120
-/// Internal op the idle timer queues so the worker itself unloads a tower
-/// (named in path). Never accepted from stdin.
-let unloadOp = "_unload"
 
 func log(_ s: String) {
     FileHandle.standardError.write(Data((s + "\n").utf8))
@@ -59,12 +53,14 @@ struct RequestLines: AsyncSequence {
 
 struct Options {
     var model: URL
+    var cache: URL?
     var dims: Int
     var idleExit: TimeInterval
 }
 
 func parseOptions() -> Options {
     var model: String?
+    var cache: String?
     var dims = 256
     var idle: TimeInterval = 600
     var args = CommandLine.arguments.dropFirst()
@@ -75,6 +71,7 @@ func parseOptions() -> Options {
     while let a = args.popFirst() {
         switch a {
         case "--model": model = value(a)
+        case "--cache": cache = value(a)
         case "--dims":
             guard let d = Int(value(a)), [128, 256, 512, 768].contains(d) else { die("--dims must be 128, 256, 512 or 768") }
             dims = d
@@ -84,8 +81,11 @@ func parseOptions() -> Options {
         default: die("unknown argument \(a)")
         }
     }
-    guard let model else { die("usage: semd-embed --model DIR [--dims 256] [--idle-exit SECONDS]") }
-    return Options(model: URL(fileURLWithPath: model, isDirectory: true), dims: dims, idleExit: idle)
+    guard let model else { die("usage: semd-embed --model DIR [--cache DIR] [--dims 256] [--idle-exit SECONDS]") }
+    if let cache, !cache.hasPrefix("/") { die("--cache must be an absolute path") }
+    return Options(
+        model: URL(fileURLWithPath: model, isDirectory: true),
+        cache: cache.map { URL(fileURLWithPath: $0, isDirectory: true) }, dims: dims, idleExit: idle)
 }
 
 // MARK: protocol
@@ -146,7 +146,6 @@ actor Jobs {
     private var closed = false
     private(set) var busy = false
     private(set) var lastActive = Date()
-    private var towerUsed: [String: Date] = [:]
 
     func push(_ r: Request) {
         lastActive = Date()
@@ -159,28 +158,6 @@ actor Jobs {
         } else {
             index.append(r)
         }
-    }
-
-    /// Queues internal work without counting as activity.
-    func pushInternal(_ r: Request) {
-        if let w = waiter {
-            waiter = nil
-            busy = true
-            w.resume(returning: r)
-        } else {
-            index.append(r)
-        }
-    }
-
-    func used(_ tower: String) { towerUsed[tower] = Date() }
-
-    /// The towers idle for t, each reported once per idle period.
-    func idleTowers(_ t: TimeInterval) -> [String] {
-        guard !busy else { return [] }
-        let now = Date()
-        let idle = towerUsed.filter { now.timeIntervalSince($0.value) >= t }.map(\.key).sorted()
-        for name in idle { towerUsed[name] = nil }
-        return idle
     }
 
     func close() {
@@ -209,55 +186,19 @@ actor Jobs {
 
 /// Identifies the weights: the model id changes whenever they do, which
 /// makes semd demand a reindex instead of mixing embedding spaces.
-func modelID(text: URL, vision: URL?, audio: URL?) -> String {
-    func sha(_ dir: URL) -> Substring {
-        // Quantized weights carry the hash of the converted file; unconverted
-        // ones (audio-bf16) only that of the source.
-        struct Manifest: Decodable {
-            var output_sha256: String? = nil
-            var sha256: String? = nil
-        }
-        guard let data = try? Data(contentsOf: dir.appendingPathComponent("manifest.json")),
-              let m = try? JSONDecoder().decode(Manifest.self, from: data),
-              let h = m.output_sha256 ?? m.sha256, h.count >= 12
-        else { die("cannot read \(dir.path)/manifest.json") }
-        return h.prefix(12)
-    }
-    var id = "embeddinggemma-2/" + sha(text)
-    if let vision { id += "+v" + sha(vision) }
-    if let audio { id += "+a" + sha(audio) }
-    return id
-}
+let modelID = "embeddinggemma-2-litert/" + modelSHA256.prefix(12)
 
 /// Everything the worker needs; touched by the worker only.
 struct Worker: Sendable {
-    let encoder: TextEncoder
-    let dims: Int
-    let vision: Tower?
-    let audio: Tower?
+    let engine: Engine
     let pdfs: PDFCache
-    let jobs: Jobs
     let out: Output
 
     func run(_ r: Request) async {
-        if r.op == unloadOp {
-            switch r.path {
-            case vision?.name:
-                await vision?.unload()
-                pdfs.drop()
-            case audio?.name:
-                await audio?.unload()
-            default:
-                die("unload of unknown tower \(r.path ?? "")")
-            }
-            return
-        }
         do {
             out.send(try await handle(r))
         } catch let f as Failure {
             out.fail(r.id, f.code, f.message)
-        } catch let e as EmbeddingError {
-            out.fail(r.id, "invalid", e.description)
         } catch {
             out.fail(r.id, "internal", String(describing: error))
         }
@@ -265,9 +206,9 @@ struct Worker: Sendable {
 
     private func handle(_ r: Request) async throws -> [String: Any] {
         switch r.op {
-        case "embed_text": return try await embedText(r)
-        case "embed_image": return try await embedImage(r)
-        case "extract_pdf": return try await extractPDF(r)
+        case "embed_text": return try embedText(r)
+        case "embed_image": return try embedImage(r)
+        case "extract_pdf": return try extractPDF(r)
         case "render_pdf_page": return try renderPDFPage(r)
         case "probe_media": return try await probeMedia(r)
         case "embed_audio": return try await embedAudio(r)
@@ -276,30 +217,16 @@ struct Worker: Sendable {
         }
     }
 
-    private func embedText(_ r: Request) async throws -> [String: Any] {
+    private func embedText(_ r: Request) throws -> [String: Any] {
         guard let texts = r.texts, !texts.isEmpty else { throw Failure.invalid("no texts") }
         guard texts.count <= maxBatch else { throw Failure.invalid("batch of \(texts.count) exceeds \(maxBatch)") }
         // Prompts were applied by semd: encode as-is.
-        let vectors = try await encoder.encode(texts, task: .raw, dimensions: dims)
-        guard vectors.count == texts.count, vectors.allSatisfy({ $0.count == dims }) else {
-            throw Failure.internal("encoder returned the wrong shape")
-        }
-        return ["id": r.id, "vectors": vectors.map(encodeVector)]
+        return ["id": r.id, "vectors": try engine.embed(texts: texts).map(encodeVector)]
     }
 
-    private func embedImageVector(_ image: RGBImage, softTokens: Int = imageSoftTokens) async throws -> String {
-        guard let vision else { throw Failure.internal("no vision weights") }
-        let prepared = try ImageProcessor.prepare(image, maxSoftTokens: softTokens)
-        await vision.ensure()
-        let v = try await encoder.encodeImage(prepared, dimensions: dims)
-        await jobs.used(vision.name)
-        guard v.count == dims else { throw Failure.internal("image vector has \(v.count) dims") }
-        return encodeVector(v)
-    }
-
-    private func embedImage(_ r: Request) async throws -> [String: Any] {
+    private func embedImage(_ r: Request) throws -> [String: Any] {
         guard let path = r.path, path.hasPrefix("/") else { throw Failure.internal("embed_image needs an absolute path") }
-        return ["id": r.id, "vectors": [try await embedImageVector(try loadImage(path))]]
+        return ["id": r.id, "vectors": [encodeVector(try engine.embed(image: try loadImage(path)))]]
     }
 
     private func probeMedia(_ r: Request) async throws -> [String: Any] {
@@ -310,31 +237,22 @@ struct Worker: Sendable {
 
     private func embedAudio(_ r: Request) async throws -> [String: Any] {
         // semd validates requests: a bad one is its bug.
-        guard let audio, let path = r.path, path.hasPrefix("/"), let start = r.startMS, let end = r.endMS,
+        guard let path = r.path, path.hasPrefix("/"), let start = r.startMS, let end = r.endMS,
               start >= 0, (minAudioWindowMS...maxAudioWindowMS).contains(end - start)
         else { throw Failure.internal("malformed embed_audio request") }
         let samples = try await loadAudio(path, startMS: start, endMS: end)
         // Shorter than the encoder's minimum or quiet: nothing to embed.
         guard samples.count >= 161, rms(samples) >= silenceRMS else { return ["id": r.id, "vectors": [String](), "silent": true] }
-        let prepared = try AudioProcessor.prepare(samples: samples)
-        await audio.ensure()
-        let v = try await encoder.encodeAudio(prepared, dimensions: dims)
-        await jobs.used(audio.name)
-        guard v.count == dims else { throw Failure.internal("audio vector has \(v.count) dims") }
-        return ["id": r.id, "vectors": [encodeVector(v)]]
+        return ["id": r.id, "vectors": [encodeVector(try engine.embed(audio: samples))]]
     }
 
     private func embedFrames(_ r: Request) async throws -> [String: Any] {
         guard let path = r.path, path.hasPrefix("/"), let times = r.timesMS,
               (1...maxFramesPerCall).contains(times.count), times.allSatisfy({ $0 >= 0 })
         else { throw Failure.internal("malformed embed_frames request") }
-        var vectors: [String] = []
-        for img in try await loadFrames(path, timesMS: times) {
-            vectors.append(try await embedImageVector(img, softTokens: frameSoftTokens))
-        }
-        return ["id": r.id, "vectors": vectors]
+        let frames = try await loadFrames(path, timesMS: times)
+        return ["id": r.id, "vectors": try frames.map { encodeVector(try engine.embed(frame: $0)) }]
     }
-
     /// A page for the quick view, the match highlighted. It needs no
     /// weights: semd offers it with the "pdf" modality.
     private func renderPDFPage(_ r: Request) throws -> [String: Any] {
@@ -354,12 +272,11 @@ struct Worker: Sendable {
         return ["id": r.id, "page_count": doc.pageCount, "png": png.base64EncodedString()]
     }
 
-    private func extractPDF(_ r: Request) async throws -> [String: Any] {
+    private func extractPDF(_ r: Request) throws -> [String: Any] {
         // semd validates requests: a bad one is its bug.
         guard let path = r.path, path.hasPrefix("/"), let from = r.from, let count = r.count,
               from >= 1, (1...maxPDFPagesPerCall).contains(count), (0...count).contains(r.render ?? 0)
         else { throw Failure.internal("malformed extract_pdf request") }
-        guard vision != nil else { throw Failure.internal("no vision weights") }
         let doc = try pdfs.open(path)
         let n = doc.pageCount
         var budget = r.render ?? 0
@@ -376,7 +293,7 @@ struct Worker: Sendable {
                 if budget > 0 {
                     budget -= 1
                     guard let ref = page.pageRef else { throw Failure.invalid("cannot render page \(i)") }
-                    p["vector"] = try await embedImageVector(try renderPage(ref))
+                    p["vector"] = encodeVector(try engine.embed(image: try renderPage(ref)))
                 } else {
                     p["unrendered"] = true
                 }
@@ -388,64 +305,75 @@ struct Worker: Sendable {
     }
 }
 
+/// Makes cache hold LiteRT's compiled programs for the model file at path
+/// only. LiteRT names them after the file's size and mtime and never deletes
+/// any, so a model downloaded again would leave hundreds of MB behind: they
+/// are deleted whenever the file they were made for changes. It is kept
+/// out of backups, being rebuilt on demand.
+func prepareCache(_ cache: URL, for path: String) throws {
+    let fm = FileManager.default
+    let a = try fm.attributesOfItem(atPath: path)
+    guard let size = (a[.size] as? NSNumber)?.uint64Value, let mtime = a[.modificationDate] as? Date,
+          let inode = (a[.systemFileNumber] as? NSNumber)?.uint64Value
+    else { throw Failure.internal("stat \(path): missing attributes") }
+    let key = "\(modelSHA256) \(size) \(inode) \(mtime.timeIntervalSince1970)\n"
+    let stamp = cache.appendingPathComponent("MODEL")
+    if (try? String(contentsOf: stamp, encoding: .utf8)) != key {
+        if fm.fileExists(atPath: cache.path) {
+            // LiteRT's files only: they are named after the model file.
+            for name in try fm.contentsOfDirectory(atPath: cache.path) where name.hasPrefix(modelFile) {
+                try fm.removeItem(at: cache.appendingPathComponent(name))
+            }
+            log("cache \(cache.path) cleared: made for another model file")
+        }
+        try fm.createDirectory(at: cache, withIntermediateDirectories: true)
+        try key.write(to: stamp, atomically: true, encoding: .utf8)
+    }
+    var dir = cache
+    var v = URLResourceValues()
+    v.isExcludedFromBackup = true
+    try dir.setResourceValues(v)
+}
+
 @main
 struct SemdEmbed {
     static func main() async {
         let opt = parseOptions()
-        // Bound reusable GPU buffers so the idle footprint stays small.
-        Memory.cacheLimit = 64 * 1024 * 1024
-        let textDir = opt.model.appendingPathComponent("text-q8", isDirectory: true)
-        var visionDir: URL? = opt.model.appendingPathComponent("vision-q8", isDirectory: true)
-        if let d = visionDir, !FileManager.default.fileExists(atPath: d.appendingPathComponent("manifest.json").path) {
-            log("warning: no \(d.path): images and PDFs are not offered")
-            visionDir = nil
-        }
-        var audioDir: URL? = opt.model.appendingPathComponent("audio-bf16", isDirectory: true)
-        if let d = audioDir, !FileManager.default.fileExists(atPath: d.appendingPathComponent("manifest.json").path) {
-            log("warning: no \(d.path): audio is not offered")
-            audioDir = nil
-        }
-        let id = modelID(text: textDir, vision: visionDir, audio: audioDir)
-        var modalities = ["text"]
-        if visionDir != nil { modalities += ["image", "pdf", "video"] }
-        if audioDir != nil { modalities += ["audio"] }
-        let t0 = Date()
-        let encoder: TextEncoder
+        let file = opt.model.appendingPathComponent(modelPart).appendingPathComponent(modelFile).path
+        // internal/model verified the file when installing it; a wrong size
+        // means it was changed since, and would embed into another space.
+        let size: UInt64
         do {
-            encoder = try await TextEncoder(directory: textDir, progress: { log("load: " + $0) })
+            size = (try FileManager.default.attributesOfItem(atPath: file)[.size] as? NSNumber)?.uint64Value ?? 0
+        } catch {
+            die("no model: \(error.localizedDescription)")
+        }
+        guard size == modelSize else { die("\(file) is \(size) bytes, not \(modelSize): not the pinned model") }
+        if let cache = opt.cache {
+            do {
+                try prepareCache(cache, for: file)
+            } catch {
+                die("cache \(cache.path): \(error.localizedDescription)")
+            }
+        }
+        let t0 = Date()
+        let engine: Engine
+        do {
+            engine = try Engine(model: file, cache: opt.cache?.path, dims: opt.dims)
         } catch {
             die("load model: \(error)")
         }
-        let precision = await encoder.weightFormat()
-        log(String(format: "model %@ (%@) loaded in %.2fs", id, precision, Date().timeIntervalSince(t0)))
+        log(String(format: "model %@ (%@) loaded in %.2fs", modelID, modelPrecision, Date().timeIntervalSince(t0)))
 
         let out = Output()
         let jobs = Jobs()
-        let w = Worker(
-            encoder: encoder, dims: opt.dims,
-            vision: visionDir.map { dir in
-                Tower(name: "vision", load: { try await encoder.enableVision(directory: dir) }, drop: { await encoder.disableVision() })
-            },
-            audio: audioDir.map { dir in
-                Tower(name: "audio", load: { try await encoder.enableAudio(directory: dir) }, drop: { await encoder.disableAudio() })
-            },
-            pdfs: PDFCache(), jobs: jobs, out: out)
+        let w = Worker(engine: engine, pdfs: PDFCache(), out: out)
 
         // Worker: one request at a time, at the QoS its priority asks for.
         let worker = Task {
             while let r = await jobs.next() {
                 let prio: TaskPriority = r.priority == "query" ? .userInitiated : .utility
                 await Task(priority: prio) { await w.run(r) }.value
-            }
-        }
-
-        // Vision (~200 MB) and audio (~600 MB) weights leave memory when unused for a while.
-        Task.detached(priority: .background) {
-            while true {
-                try? await Task.sleep(for: .seconds(15))
-                for name in await jobs.idleTowers(towerIdle) {
-                    await jobs.pushInternal(Request(id: 0, op: unloadOp, path: name))
-                }
             }
         }
 
@@ -474,8 +402,9 @@ struct SemdEmbed {
                         continue
                     }
                     out.send([
-                        "id": r.id, "protocol": protocolVersion, "model": id, "precision": precision,
-                        "dims": opt.dims, "modalities": modalities, "max_batch": maxBatch, "max_tokens": maxTokens,
+                        "id": r.id, "protocol": protocolVersion, "model": modelID, "precision": modelPrecision,
+                        "dims": opt.dims, "modalities": ["text", "image", "pdf", "video", "audio"],
+                        "max_batch": maxBatch, "max_tokens": maxTokens,
                     ])
                 case "embed_text", "embed_image", "extract_pdf", "render_pdf_page", "probe_media", "embed_audio", "embed_frames":
                     await jobs.push(r)

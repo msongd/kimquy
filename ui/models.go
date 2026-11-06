@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -272,21 +273,26 @@ func (a *app) setupView(c *ui.Context) {
 	t := c.Theme()
 	ms := &a.model
 	if ms.want == nil {
-		ms.want = map[string]bool{"vision-q8": true}
+		ms.want = map[string]bool{}
 	}
 	ui.Column(c).Fill().Padding(28, 32).Gap(12).Children(func() {
 		ui.Text(c, "Welcome to Kim Quy").FontSize(22).Bold()
 		ui.Text(c, "Kim Quy searches your files by meaning with EmbeddingGemma 2, a model that runs on this Mac: "+
 			"nothing you index leaves it. Download the model once, or use a copy you have (a folder holding "+
-			model.Parts[0].Dir+", or an older Kim Quy.app).").Wrap()
+			model.Parts[0].Dir+", or a Kim Quy.app with the model built in).").Wrap()
 		if ms.haveErr != "" {
 			ui.Text(c, "The model is damaged: "+ms.haveErr+". Download it again.").TextColor(t.Danger).Wrap()
 		}
 		busy := ms.installing != ""
+		optional := slices.ContainsFunc(model.Parts, func(p model.Part) bool { return !p.Required })
 		for _, p := range model.Parts {
 			ui.Row(c).Key(p.Dir).Gap(8).AlignItems(ui.Center).Children(func() {
-				on := p.Required || ms.want[p.Dir]
 				label := fmt.Sprintf("%s — %s", p.Label, model.Bytes(p.Size()))
+				if !optional {
+					ui.Text(c, label)
+					return
+				}
+				on := p.Required || ms.want[p.Dir]
 				if p.Required {
 					label += " (required)"
 				}
@@ -297,9 +303,11 @@ func (a *app) setupView(c *ui.Context) {
 		}
 		parts := a.chosenParts()
 		ui.Text(c, a.freeLine(partsSize(parts))).FontSize(12).TextColor(t.TextMuted)
-		ui.Text(c, "Parts can be added later in Settings › Model; adding one rebuilds the index. "+
-			"The model is from Hugging Face ("+model.Repo+"), under the "+model.License+" license.").
-			FontSize(11).TextColor(t.TextMuted).Wrap()
+		note := "The model is from Hugging Face (" + model.Repo + "), under the " + model.License + " license."
+		if optional {
+			note = "Parts can be added later in Settings › Model; adding one rebuilds the index. " + note
+		}
+		ui.Text(c, note).FontSize(11).TextColor(t.TextMuted).Wrap()
 		if ms.installErr != "" {
 			ui.Text(c, ms.installErr).TextColor(t.Danger).Wrap()
 		}

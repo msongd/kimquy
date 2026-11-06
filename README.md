@@ -27,17 +27,17 @@ what lies at the bottom of the lake.
   battery and under load.
 - **Native and light.**
   - A menu-bar app with a global shortcut.
-  - The model runs on the GPU through MLX.
+  - The model runs on the GPU through LiteRT-LM.
   - The daemon is a single Go binary with its own vector store.
-- **A small download.** The app is about 45 MB. At first launch it
-  downloads the model parts you choose, or imports files you already have.
+- **A small download.** The app is about 90 MB. At first launch it
+  downloads the model, or imports a copy you already have.
 
 ## Requirements
 
 - macOS 14 or later on Apple Silicon.
-- About 320 MB of disk space for the text model.
-  - Images, PDFs and video frames add 193 MB.
-  - Audio adds 611 MB.
+- About 800 MB of disk space: 485 MB for the model (text, images, PDFs,
+  audio and video in one file) and about 310 MB for the GPU programs
+  compiled from it, which make later starts fast.
 
 ## How it works
 
@@ -46,8 +46,10 @@ Kim Quy.app
 ├── Contents/MacOS/KimQuy        the UI: MyGo, pure Go, no webview
 └── Contents/Helpers/
     ├── semd                     the daemon: crawls, watches, indexes, serves a local API
-    ├── semd-embed               the embedder: Swift + MLX, runs EmbeddingGemma 2
+    ├── semd-embed               the embedder: Swift + LiteRT-LM, runs EmbeddingGemma 2
     └── semctl                   the command line client
+└── Contents/Frameworks/
+    └── libCLiteRTLM_mac.dylib   LiteRT-LM
 ```
 
 `semd` runs as a LaunchAgent. It talks to the UI and to `semctl` over a
@@ -56,7 +58,8 @@ the index and the model.
 
 ## Build
 
-You need Go 1.27 or later and Xcode 16 or later (for `semd-embed`).
+You need Go 1.27 or later and Xcode 26.4 or later (Swift 6.3, for
+`semd-embed`). The first build downloads LiteRT-LM, pinned by its SHA-256.
 
 ```sh
 make build   # bin/semd, bin/semctl, bin/KimQuy and semd-embed
@@ -115,7 +118,7 @@ index, the model, the settings, the logs and the app.
 | `cmd/semd`, `cmd/semctl` | the daemon and the CLI |
 | `internal/` | crawl, extract, chunk, embed, store, watch, scheduling, API, model download |
 | `ui/` | the MyGo app; a separate Go module, so the daemon has no third-party dependencies |
-| `embedder/` | `semd-embed`, the Swift sidecar, with the vendored EmbeddingGemma2Swift |
+| `embedder/` | `semd-embed`, the Swift sidecar on the LiteRT-LM C API |
 | `packaging/` | the app and dmg build, the icon drawn in Go, and `uninstall.sh` |
 | `docs/dev/` | the design plan and the results of each milestone |
 
@@ -124,10 +127,9 @@ index, the model, the settings, the logs and the app.
 Kim Quy is released under the [MIT License](LICENSE).
 
 - [EmbeddingGemma 2](https://huggingface.co/google) by Google. The app
-  uses the MLX weights from
-  [Nurymanau/EmbeddingGemma-2-MLX-Swift](https://huggingface.co/Nurymanau/EmbeddingGemma-2-MLX-Swift)
-  (Apache-2.0), which it downloads; they are not in this repository.
-- [EmbeddingGemma2Swift](https://github.com/Obscyra-app/EmbeddingGemma2Swift)
-  (MIT), vendored in `embedder/Vendor` with its license and notices.
-- [MLX Swift](https://github.com/ml-explore/mlx-swift) (MIT) and
-  [MyGo](https://mygo.egoist.dev/).
+  uses the int4 LiteRT-LM build from
+  [litert-community/embeddinggemma-2-740m-litert-lm](https://huggingface.co/litert-community/embeddinggemma-2-740m-litert-lm)
+  (Apache-2.0), which it downloads; it is not in this repository.
+- [LiteRT-LM](https://github.com/google-ai-edge/LiteRT-LM) (Apache-2.0),
+  fetched by SwiftPM at build time and shipped in the app.
+- [MyGo](https://mygo.egoist.dev/).

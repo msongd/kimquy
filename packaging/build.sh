@@ -7,9 +7,9 @@
 #   VERSION         app version (default 0.1.0)
 #   OUT             output directory (default packaging/out)
 #   BUNDLE_MODELS   0 (default): a slim app without the model, which it downloads at
-#                   first launch (about 50 MB instead of 1.1 GB); 1: bundle MODELS in it
-#   MODELS          with BUNDLE_MODELS=1: the model directory, holding text-q8 and any of
-#                   vision-q8, audio-bf16 (default models/release)
+#                   first launch (about 90 MB instead of 550 MB); 1: bundle MODELS in it
+#   MODELS          with BUNDLE_MODELS=1: the model directory, holding litert/ (default
+#                   models/release)
 #   SIGN_ID         codesign identity, e.g. "Developer ID Application: … (TEAMID)";
 #                   default "-" signs ad hoc (runs on this Mac only, Gatekeeper rejects it elsewhere)
 #   NOTARY_PROFILE  notarytool keychain profile (xcrun notarytool store-credentials);
@@ -38,21 +38,27 @@ MIN_MACOS=14.0
 grep -q "BundleID *= \"$BUNDLE_ID\"" "$REPO/internal/agent/agent.go" || die "BUNDLE_ID differs from agent.BundleID"
 [[ $BUNDLE_MODELS == 0 || $BUNDLE_MODELS == 1 ]] || die "BUNDLE_MODELS must be 0 or 1, not $BUNDLE_MODELS"
 if [[ $BUNDLE_MODELS == 1 ]]; then
-	# semd-embed takes a part to be there when its manifest is.
-	[[ -f $MODELS/text-q8/manifest.json ]] || die "missing model $MODELS/text-q8"
-	for m in "$MODELS"/*; do
-		case $(basename "$m") in
-		text-q8 | vision-q8 | audio-bf16) ;;
-		*) die "unexpected $m in MODELS: only text-q8, vision-q8, audio-bf16 belong" ;;
+	# The one part of internal/model.Parts, as pinned there.
+	MODEL_FILE=embeddinggemma-2-740m.litertlm
+	MODEL_SHA=$(sed -n "s/^.*{\"$MODEL_FILE\", [0-9]*, \"\([0-9a-f]\{64\}\)\"}.*$/\1/p" "$REPO/internal/model/model.go")
+	[[ $MODEL_SHA =~ ^[0-9a-f]{64}$ ]] || die "cannot find the pinned hash of $MODEL_FILE in internal/model/model.go"
+	[[ -f $MODELS/litert/$MODEL_FILE ]] || die "missing model $MODELS/litert/$MODEL_FILE"
+	for m in "$MODELS"/* "$MODELS"/litert/*; do
+		case ${m#"$MODELS"/} in
+		litert | "litert/$MODEL_FILE") ;;
+		*) die "unexpected $m in MODELS: only litert/$MODEL_FILE belongs" ;;
 		esac
 	done
+	step "verify $MODELS/litert/$MODEL_FILE"
+	[[ $(shasum -a 256 "$MODELS/litert/$MODEL_FILE" | cut -d' ' -f1) == "$MODEL_SHA" ]] ||
+		die "$MODELS/litert/$MODEL_FILE is not the pinned model (sha256 $MODEL_SHA)"
 fi
 [[ $NO_DMG == 0 || $NO_DMG == 1 ]] || die "NO_DMG must be 0 or 1, not $NO_DMG"
 [[ $NO_DMG == 0 || -z $NOTARY_PROFILE ]] || die "NOTARY_PROFILE needs the dmg; unset NO_DMG"
 if [[ -n $NOTARY_PROFILE && $SIGN_ID == - ]]; then
 	die "NOTARY_PROFILE needs a Developer ID SIGN_ID; ad hoc signatures cannot be notarized"
 fi
-for tool in go xcodebuild codesign diskutil hdiutil plutil ditto; do
+for tool in go swift lipo install_name_tool otool codesign diskutil hdiutil plutil ditto shasum; do
 	command -v "$tool" >/dev/null || die "$tool not found"
 done
 
@@ -62,12 +68,12 @@ DMG="$OUT/$EXE-$VERSION.dmg"
 rm -rf "$BUILD" "$APP" "$DMG"
 mkdir -p "$BUILD"
 
-step "semd-embed (Swift, MLX)"
-PRODUCTS=$REPO/embedder/.build-xcode/Build/Products/Release
-(cd "$REPO/embedder" && xcodebuild -quiet -scheme semd-embed -configuration Release \
-	-destination 'platform=macOS,arch=arm64' -derivedDataPath .build-xcode \
-	CLANG_ENABLE_CODE_COVERAGE=NO CLANG_COVERAGE_MAPPING=NO SWIFT_ENABLE_CODE_COVERAGE=NO build) >&2
-[[ -f $PRODUCTS/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib ]] || die "MLX metallib was not built"
+step "semd-embed (Swift, LiteRT-LM)"
+SWIFTBUILD=(swift build --package-path "$REPO/embedder" -c release --arch arm64)
+"${SWIFTBUILD[@]}" >&2
+PRODUCTS=$("${SWIFTBUILD[@]}" --show-bin-path)
+LITERT=libCLiteRTLM_mac.dylib
+[[ -x $PRODUCTS/semd-embed && -f $PRODUCTS/$LITERT ]] || die "semd-embed or $LITERT was not built"
 
 step "semd, semctl (Go, cgo for FSEvents)"
 export GOOS=darwin GOARCH=arm64 GOFLAGS=-trimpath MACOSX_DEPLOYMENT_TARGET=$MIN_MACOS
@@ -85,16 +91,25 @@ iconutil -c icns -o "$BUILD/AppIcon.icns" "$BUILD/AppIcon.iconset"
 
 step "assemble $APP"
 C=$APP/Contents
-mkdir -p "$C/MacOS" "$C/Helpers" "$C/Resources"
+mkdir -p "$C/MacOS" "$C/Helpers" "$C/Frameworks" "$C/Resources"
 install -m 755 "$BUILD/$EXE" "$C/MacOS/$EXE"
 install -m 755 "$BUILD/semd" "$BUILD/semctl" "$PRODUCTS/semd-embed" "$C/Helpers/"
 install -m 644 "$BUILD/AppIcon.icns" "$C/Resources/AppIcon.icns"
-# SwiftPM resource bundles (the MLX metallib among them) are looked up next
-# to the executable that uses them.
-BUNDLES=(mlx-swift_Cmlx.bundle swift-crypto_Crypto.bundle swift-transformers_Hub.bundle)
-for b in "${BUNDLES[@]}"; do
-	ditto "$PRODUCTS/$b" "$C/Helpers/$b"
-done
+# LiteRT-LM ships universal; the app is arm64 only.
+lipo "$PRODUCTS/$LITERT" -thin arm64 -output "$C/Frameworks/$LITERT"
+# semd-embed finds it through @executable_path/../Frameworks. The build's
+# other rpaths (@loader_path, the toolchain's folders on this Mac) go: the
+# app must not look for code outside itself and the system.
+rpaths() { otool -l "$1" | awk '$1 == "cmd" { rp = $2 == "LC_RPATH" } rp && $1 == "path" { print $2 }'; }
+rpaths "$C/Helpers/semd-embed" | grep -qx "@executable_path/../Frameworks" || die "semd-embed lacks its Frameworks rpath"
+while read -r rp; do
+	case $rp in
+	/usr/lib/swift | @executable_path/../Frameworks) ;;
+	*) install_name_tool -delete_rpath "$rp" "$C/Helpers/semd-embed" ;;
+	esac
+done < <(rpaths "$C/Helpers/semd-embed")
+[[ $(rpaths "$C/Helpers/semd-embed" | grep -cvxE '/usr/lib/swift|@executable_path/\.\./Frameworks') == 0 ]] ||
+	die "semd-embed keeps rpaths outside the app and the system"
 if [[ $BUNDLE_MODELS == 1 ]]; then
 	ditto "$MODELS" "$C/Resources/models"
 fi
@@ -127,16 +142,22 @@ printf 'APPL????' >"$C/PkgInfo"
 
 step "sign ($([[ $SIGN_ID == - ]] && echo "ad hoc" || echo "$SIGN_ID"))"
 SIGN=(codesign --force --options runtime --sign "$SIGN_ID")
+SIGN_PLAIN=(codesign --force --sign "$SIGN_ID" --timestamp=none) # ad hoc only
 if [[ $SIGN_ID == - ]]; then
 	SIGN+=(--timestamp=none)
 else
 	SIGN+=(--timestamp)
 fi
 # Inside out: nested code first, the app last.
-for b in "${BUNDLES[@]}"; do
-	"${SIGN[@]}" "$C/Helpers/$b"
-done
-"${SIGN[@]}" --identifier dev.kimquy.semd-embed "$C/Helpers/semd-embed"
+"${SIGN[@]}" "$C/Frameworks/$LITERT"
+# The hardened runtime loads only libraries of the signer's team, and an ad
+# hoc signature has none: an ad hoc semd-embed goes without it to load
+# LiteRT-LM. A Developer ID signs both, so a release keeps it.
+if [[ $SIGN_ID == - ]]; then
+	"${SIGN_PLAIN[@]}" --identifier dev.kimquy.semd-embed "$C/Helpers/semd-embed"
+else
+	"${SIGN[@]}" --identifier dev.kimquy.semd-embed "$C/Helpers/semd-embed"
+fi
 "${SIGN[@]}" --identifier dev.kimquy.semd "$C/Helpers/semd"
 "${SIGN[@]}" --identifier dev.kimquy.semctl "$C/Helpers/semctl"
 "${SIGN[@]}" "$APP"

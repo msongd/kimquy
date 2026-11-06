@@ -25,7 +25,7 @@ func fixture(t *testing.T) map[string][]byte {
 	t.Helper()
 	data := map[string][]byte{}
 	mk := func(dir string, required bool, files map[string]int) Part {
-		p := Part{Dir: dir, Label: dir, Required: required}
+		p := Part{Dir: dir, Remote: dir, Label: dir, Required: required}
 		for _, name := range []string{"weights.bin", "manifest.json"} {
 			b := bytes.Repeat([]byte(dir+"/"+name+";"), files[name])
 			data[dir+"/"+name] = b
@@ -36,8 +36,8 @@ func fixture(t *testing.T) map[string][]byte {
 	}
 	old := Parts
 	Parts = []Part{
-		mk("text-q8", true, map[string]int{"weights.bin": 5000, "manifest.json": 3}),
-		mk("vision-q8", false, map[string]int{"weights.bin": 3000, "manifest.json": 2}),
+		mk("base", true, map[string]int{"weights.bin": 5000, "manifest.json": 3}),
+		mk("extra", false, map[string]int{"weights.bin": 3000, "manifest.json": 2}),
 	}
 	t.Cleanup(func() { Parts = old })
 	return data
@@ -114,7 +114,7 @@ func TestDownload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantInstalled(t, in.Dir, "text-q8", "vision-q8")
+	wantInstalled(t, in.Dir, "base", "extra")
 	if want := Parts[0].Size() + Parts[1].Size(); last != want || total != want {
 		t.Errorf("progress ended at %d of %d, want %d", last, total, want)
 	}
@@ -131,11 +131,11 @@ func TestDownloadOnePart(t *testing.T) {
 	if err := in.Download(context.Background(), Parts[:1], nil); err != nil {
 		t.Fatal(err)
 	}
-	wantInstalled(t, in.Dir, "text-q8")
+	wantInstalled(t, in.Dir, "base")
 	if err := in.Download(context.Background(), Parts[1:], nil); err != nil {
 		t.Fatal(err)
 	}
-	wantInstalled(t, in.Dir, "text-q8", "vision-q8")
+	wantInstalled(t, in.Dir, "base", "extra")
 }
 
 // stage leaves the first n bytes of a file as an interrupted download would.
@@ -155,7 +155,7 @@ func TestDownloadResumes(t *testing.T) {
 	data := fixture(t)
 	s := newServer(t, data)
 	in := installer(t, s)
-	stage(t, in, data, "text-q8/weights.bin", 1234)
+	stage(t, in, data, "base/weights.bin", 1234)
 	var first int64 = -1
 	err := in.Download(context.Background(), Parts[:1], func(d, _ int64) {
 		if first < 0 {
@@ -165,7 +165,7 @@ func TestDownloadResumes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantInstalled(t, in.Dir, "text-q8")
+	wantInstalled(t, in.Dir, "base")
 	if first != 1234 {
 		t.Errorf("progress started at %d, want 1234", first)
 	}
@@ -183,11 +183,11 @@ func TestDownloadRestartsWhenRangeIgnored(t *testing.T) {
 		return true
 	}
 	in := installer(t, s)
-	stage(t, in, data, "text-q8/weights.bin", 1234)
+	stage(t, in, data, "base/weights.bin", 1234)
 	if err := in.Download(context.Background(), Parts[:1], nil); err != nil {
 		t.Fatal(err)
 	}
-	wantInstalled(t, in.Dir, "text-q8")
+	wantInstalled(t, in.Dir, "base")
 }
 
 func TestDownloadRejectsBadContentRange(t *testing.T) {
@@ -203,7 +203,7 @@ func TestDownloadRejectsBadContentRange(t *testing.T) {
 		return true
 	}
 	in := installer(t, s)
-	stage(t, in, data, "text-q8/weights.bin", 1234)
+	stage(t, in, data, "base/weights.bin", 1234)
 	err := in.Download(context.Background(), Parts[:1], nil)
 	if err == nil || !strings.Contains(err.Error(), "Content-Range") {
 		t.Fatalf("err = %v, want a Content-Range error", err)
@@ -237,7 +237,7 @@ func TestDownloadBadHash(t *testing.T) {
 	if err := in.Download(context.Background(), Parts[:1], nil); err != nil {
 		t.Fatal(err)
 	}
-	wantInstalled(t, in.Dir, "text-q8")
+	wantInstalled(t, in.Dir, "base")
 }
 
 func TestDownloadHTTPError(t *testing.T) {
@@ -306,7 +306,7 @@ func TestDownloadReplacesDamagedPart(t *testing.T) {
 	if err := in.Download(context.Background(), Parts[:1], nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Truncate(filepath.Join(in.Dir, "text-q8", "weights.bin"), 10); err != nil {
+	if err := os.Truncate(filepath.Join(in.Dir, "base", "weights.bin"), 10); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Installed(in.Dir); err == nil {
@@ -315,7 +315,7 @@ func TestDownloadReplacesDamagedPart(t *testing.T) {
 	if err := in.Download(context.Background(), Parts[:1], nil); err != nil {
 		t.Fatal(err)
 	}
-	wantInstalled(t, in.Dir, "text-q8")
+	wantInstalled(t, in.Dir, "base")
 }
 
 func TestDownloadChecksArguments(t *testing.T) {
@@ -383,7 +383,7 @@ func TestImport(t *testing.T) {
 	for name, src := range map[string]string{
 		"app":         app,
 		"model dir":   filepath.Join(app, "Contents", "Resources", "models"),
-		"part folder": filepath.Join(app, "Contents", "Resources", "models", "vision-q8"),
+		"part folder": filepath.Join(app, "Contents", "Resources", "models", "extra"),
 	} {
 		t.Run(name, func(t *testing.T) {
 			in := NewInstaller(filepath.Join(t.TempDir(), "models"))
@@ -395,7 +395,7 @@ func TestImport(t *testing.T) {
 			if len(got) != 2 {
 				t.Errorf("imported %d parts, want 2", len(got))
 			}
-			wantInstalled(t, in.Dir, "text-q8", "vision-q8")
+			wantInstalled(t, in.Dir, "base", "extra")
 			if last != total || total != Parts[0].Size()+Parts[1].Size() {
 				t.Errorf("progress ended at %d of %d", last, total)
 			}
@@ -408,10 +408,10 @@ func TestImport(t *testing.T) {
 			t.Fatal(err)
 		}
 		got, err := in.Import(context.Background(), app, nil)
-		if err != nil || len(got) != 1 || got[0].Dir != "vision-q8" {
-			t.Fatalf("got %v, %v; want vision-q8 alone", got, err)
+		if err != nil || len(got) != 1 || got[0].Dir != "extra" {
+			t.Fatalf("got %v, %v; want extra alone", got, err)
 		}
-		wantInstalled(t, in.Dir, "text-q8", "vision-q8")
+		wantInstalled(t, in.Dir, "base", "extra")
 	})
 }
 
@@ -422,12 +422,12 @@ func TestImportRefuses(t *testing.T) {
 	installed(t, data, model, Parts[0])
 	damaged := filepath.Join(root, "damaged")
 	installed(t, data, damaged, Parts[0])
-	if err := os.WriteFile(filepath.Join(damaged, "text-q8", "weights.bin"), []byte("x"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(damaged, "base", "weights.bin"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	wrong := filepath.Join(root, "wrong")
 	installed(t, data, wrong, Parts[0])
-	w := filepath.Join(wrong, "text-q8", "weights.bin")
+	w := filepath.Join(wrong, "base", "weights.bin")
 	b, _ := os.ReadFile(w)
 	b[0] ^= 1
 	if err := os.WriteFile(w, b, 0o644); err != nil {
@@ -451,7 +451,7 @@ func TestImportRefuses(t *testing.T) {
 				t.Fatalf("err = %v, want %q", err, c.want)
 			}
 			if c.dir != model {
-				if have, _ := Installed(c.dir); have["text-q8"] {
+				if have, _ := Installed(c.dir); have["base"] {
 					t.Error("installed anyway")
 				}
 			}
@@ -484,21 +484,55 @@ func TestBytes(t *testing.T) {
 	}
 }
 
-// The pinned manifest must stay self-consistent: one required part, first.
+// The pinned manifest must stay self-consistent: one required part, first,
+// and no earlier model's folder among the parts.
 func TestParts(t *testing.T) {
-	if !Parts[0].Required || Parts[0].Dir != "text-q8" {
-		t.Fatal("text-q8 must come first and be required")
+	if !Parts[0].Required || Parts[0].Dir != "litert" {
+		t.Fatal("litert must come first and be required")
 	}
 	for _, p := range Parts {
+		if slices.Contains(Obsolete, p.Dir) {
+			t.Errorf("%s is both a part and obsolete", p.Dir)
+		}
 		seen := map[string]bool{}
 		for _, f := range p.Files {
-			if seen[f.Name] || f.Size <= 0 || len(f.SHA256) != 64 {
+			if seen[f.Name] || f.Size <= 0 || len(f.SHA256) != 64 || f.Name != filepath.Base(f.Name) {
 				t.Errorf("%s/%s: bad entry", p.Dir, f.Name)
 			}
 			seen[f.Name] = true
 		}
-		if !seen["manifest.json"] {
-			t.Errorf("%s has no manifest.json", p.Dir)
+	}
+}
+
+// An earlier model's folders go once the parts are in, and not before.
+func TestDropsObsolete(t *testing.T) {
+	data := fixture(t)
+	s := newServer(t, data)
+	in := installer(t, s)
+	old := filepath.Join(in.Dir, Obsolete[0])
+	oldStaged := filepath.Join(in.Dir, staging, Obsolete[1])
+	for _, d := range []string{old, oldStaged} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "weights.bin"), []byte("old"), 0o600); err != nil {
+			t.Fatal(err)
 		}
 	}
+	// The optional part alone: the model is not whole yet.
+	if err := in.Download(context.Background(), Parts[1:], nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(old); err != nil {
+		t.Fatalf("earlier model deleted before the new one is in: %v", err)
+	}
+	if err := in.Download(context.Background(), Parts[:1], nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{old, oldStaged} {
+		if _, err := os.Stat(d); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s still there: %v", d, err)
+		}
+	}
+	wantInstalled(t, in.Dir, "base", "extra")
 }

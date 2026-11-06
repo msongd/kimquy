@@ -91,7 +91,7 @@ func (d desktop) PickModel() (string, error) {
 	got, err := mygo.Dialog.Open(mygo.OpenDialogOptions{
 		Parent:                     *d.win,
 		Title:                      "Use a Model You Have",
-		Message:                    "Choose the folder holding " + model.Parts[0].Dir + ", or an older Kim Quy.app.",
+		Message:                    "Choose the folder holding " + model.Parts[0].Dir + ", or a Kim Quy.app with the model built in.",
 		ButtonLabel:                "Use",
 		Directory:                  true,
 		TreatPackagesAsDirectories: true, // an .app is a folder to choose

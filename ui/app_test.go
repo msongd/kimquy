@@ -19,6 +19,7 @@ import (
 	"github.com/msongd/kimquy/internal/client"
 	"github.com/msongd/kimquy/internal/events"
 	"github.com/msongd/kimquy/internal/kind"
+	"github.com/msongd/kimquy/internal/model"
 )
 
 // fakeSemd answers like semd from fields the test sets, and records calls.
@@ -930,13 +931,13 @@ func TestSettingsFit(t *testing.T) {
 	}
 	h.a.addActivity(evs)
 	h.a.mdl = &fakeModels{dir: "/Users/me/Library/Application Support/Kim Quy/models", free: 1e9,
-		have: map[string]bool{"text-q8": true}}
+		have: map[string]bool{model.Parts[0].Dir: true}}
 	h.a.model.installErr = long
 	h.a.model.needRebuild = true
 	h.semd.status = client.Status{
 		Indexed: 123456, Pending: 789, Failed: len(fails), Scanning: true, Watch: "live",
 		Paused:     []string{"manual", "on battery"},
-		Embedder:   client.EmbedStatus{Model: "embeddinggemma-2/eb8a067456a3+v9b18ee382729+aa163c6dc2e47", Precision: "affine8-g64", Dims: 256},
+		Embedder:   client.EmbedStatus{Model: "embeddinggemma-2-litert/e7a8a2204b91", Precision: "litert-int4", Dims: 256},
 		Store:      &client.StoreStats{Files: 123456, Records: 987654, Segments: 12},
 		StoreError: long,
 		Roots:      states,

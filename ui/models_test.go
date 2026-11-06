@@ -82,7 +82,20 @@ func maps(m map[string]bool) map[string]bool {
 	return out
 }
 
+// testParts stands in for model.Parts until the test ends: a required part
+// and two optional ones, so that choosing and adding parts is exercised.
+func testParts(t *testing.T) {
+	old := model.Parts
+	model.Parts = []model.Part{
+		{Dir: "text", Label: "Text and documents", Required: true, Files: []model.File{{Name: "w", Size: 320311585}}},
+		{Dir: "vision", Label: "Images, PDFs and video frames", Files: []model.File{{Name: "w", Size: 193110262}}},
+		{Dir: "audio", Label: "Audio and the sound of videos", Files: []model.File{{Name: "w", Size: 611318157}}},
+	}
+	t.Cleanup(func() { model.Parts = old })
+}
+
 func newModelHarness(t *testing.T, have map[string]bool) (*harness, *fakeModels, *fakeService) {
+	testParts(t)
 	h := &harness{t: t, semd: &fakeSemd{}}
 	h.start(h.semd)
 	m := &fakeModels{dir: "/Users/me/Library/Application Support/Kim Quy/models", have: have, free: 50e9}
@@ -100,8 +113,10 @@ func TestSetupDownload(t *testing.T) {
 		t.Fatal("search shows without a model")
 	}
 	h.want("Text and documents — 320 MB (required)")
-	h.want("Total: 513 MB · 50.0 GB free on this disk")
+	h.want("Total: 320 MB · 50.0 GB free on this disk")
 	h.click("Audio and the sound of videos — 611 MB")
+	h.want("Total: 932 MB · 50.0 GB free on this disk")
+	h.click("Images, PDFs and video frames — 193 MB")
 	h.want("Total: 1.1 GB · 50.0 GB free on this disk")
 	h.click("Images, PDFs and video frames — 193 MB")
 	h.want("Total: 932 MB · 50.0 GB free on this disk")
@@ -126,7 +141,7 @@ func TestSetupDownload(t *testing.T) {
 	m.step <- nil
 	(<-done)()
 	h.flush()
-	if !slices.Equal(m.downloads[0], []string{"text-q8", "audio-bf16"}) {
+	if !slices.Equal(m.downloads[0], []string{"text", "audio"}) {
 		t.Fatalf("downloaded %v", m.downloads)
 	}
 	if svc.starts != 1 || svc.restarts != 0 {
@@ -136,6 +151,28 @@ func TestSetupDownload(t *testing.T) {
 	if h.a.model.needRebuild {
 		t.Error("a first install asks for a rebuild")
 	}
+}
+
+// The model as it ships: one part, nothing to choose.
+func TestSetupOnePart(t *testing.T) {
+	h := &harness{t: t, semd: &fakeSemd{}}
+	h.start(h.semd)
+	h.a.mdl = &fakeModels{dir: "/Users/me/Library/Application Support/Kim Quy/models", have: map[string]bool{}, free: 50e9}
+	h.a.svc = &fakeService{}
+	h.Frame()
+	h.flush()
+	p := model.Parts[0]
+	h.want(p.Label + " — " + model.Bytes(p.Size()))
+	h.want("Total: " + model.Bytes(p.Size()) + " · 50.0 GB free on this disk")
+	if h.HasText(p.Label+" — "+model.Bytes(p.Size())+" (required)") || h.HasText("Parts can be added later") {
+		t.Fatal("offers a choice of parts")
+	}
+	h.click("Download")
+	h.flush()
+	if m := h.a.mdl.(*fakeModels); len(m.downloads) != 1 || !slices.Equal(m.downloads[0], []string{p.Dir}) {
+		t.Fatalf("downloaded %v", m.downloads)
+	}
+	h.want("Type to search the contents of your files.")
 }
 
 func TestSetupStopAndFail(t *testing.T) {
@@ -180,14 +217,14 @@ func TestSetupImport(t *testing.T) {
 
 func TestSetupDamaged(t *testing.T) {
 	h, _, _ := newModelHarness(t, map[string]bool{})
-	h.a.mdl.(*fakeModels).haveErr = errors.New("model: text-q8 is damaged")
+	h.a.mdl.(*fakeModels).haveErr = errors.New("model: text is damaged")
 	h.a.loadModel()
 	h.flush()
-	h.want("The model is damaged: model: text-q8 is damaged. Download it again.")
+	h.want("The model is damaged: model: text is damaged. Download it again.")
 }
 
 func TestModelTab(t *testing.T) {
-	h, m, svc := newModelHarness(t, map[string]bool{"text-q8": true})
+	h, m, svc := newModelHarness(t, map[string]bool{"text": true})
 	svc.info = agent.Info{Loaded: true, State: "running"}
 	h.click("Settings")
 	h.flush()
@@ -211,7 +248,7 @@ func TestModelTab(t *testing.T) {
 	h.click("Download")
 	h.flush()
 	h.flush()
-	if !slices.Equal(m.downloads[0], []string{"vision-q8"}) {
+	if !slices.Equal(m.downloads[0], []string{"vision"}) {
 		t.Fatalf("downloaded %v", m.downloads)
 	}
 	if svc.restarts != 1 || svc.starts != 0 {
@@ -233,7 +270,7 @@ func TestModelTab(t *testing.T) {
 }
 
 func TestModelTabBundled(t *testing.T) {
-	h, _, _ := newModelHarness(t, map[string]bool{"text-q8": true, "vision-q8": true, "audio-bf16": true})
+	h, _, _ := newModelHarness(t, map[string]bool{"text": true, "vision": true, "audio": true})
 	h.a.mdl.(*fakeModels).bundled = true
 	h.click("Settings")
 	h.flush()
@@ -263,10 +300,10 @@ func TestStateModels(t *testing.T) {
 		t.Fatalf("free %d, %v", free, err)
 	}
 	have, err := m.Installed()
-	if err != nil || have["text-q8"] {
+	if err != nil || have[model.Parts[0].Dir] {
 		t.Fatalf("have %v, %v", have, err)
 	}
-	bundled := filepath.Join(root, "Kim Quy.app", "Contents", "Resources", "models", "text-q8")
+	bundled := filepath.Join(root, "Kim Quy.app", "Contents", "Resources", "models", model.Parts[0].Dir)
 	if err := os.MkdirAll(bundled, 0o755); err != nil {
 		t.Fatal(err)
 	}

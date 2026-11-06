@@ -140,6 +140,9 @@ func (in *Installer) Download(ctx context.Context, parts []Part, progress Progre
 			return err
 		}
 	}
+	if err := in.dropObsolete(); err != nil {
+		return err
+	}
 	return in.cleanStaging()
 }
 
@@ -214,7 +217,10 @@ func (in *Installer) fetch(ctx context.Context, p Part, f File, report func(int6
 func (in *Installer) get(ctx context.Context, p Part, f File, out *os.File, off int64, report func(int64)) error {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
-	url := in.Base + "/" + p.Dir + "/" + f.Name
+	url := in.Base + "/" + f.Name
+	if p.Remote != "" {
+		url = in.Base + "/" + p.Remote + "/" + f.Name
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
@@ -291,6 +297,31 @@ func (in *Installer) place(p Part) error {
 		return fmt.Errorf("model: install %s: %w", p.Dir, err)
 	}
 	return fsutil.SyncDir(in.Dir)
+}
+
+// dropObsolete deletes the folders of earlier models, staged or placed,
+// once every part is in: semd no longer reads them.
+func (in *Installer) dropObsolete() error {
+	have, err := Installed(in.Dir)
+	if err != nil {
+		return err
+	}
+	for _, p := range Parts {
+		if p.Required && !have[p.Dir] {
+			return nil
+		}
+	}
+	for _, name := range Obsolete {
+		if _, ok := PartByDir(name); ok || name == "" || name != filepath.Base(name) {
+			panic("model: obsolete folder " + strconv.Quote(name) + " is a part or not a plain name")
+		}
+		for _, d := range []string{filepath.Join(in.Dir, name), filepath.Join(in.Dir, staging, name)} {
+			if err := os.RemoveAll(d); err != nil {
+				return fmt.Errorf("model: delete the earlier model's %s: %w", d, err)
+			}
+		}
+	}
+	return nil
 }
 
 // cleanStaging removes the staging folder once nothing is left in it.
@@ -404,6 +435,9 @@ func (in *Installer) Import(ctx context.Context, src string, progress Progress) 
 		if err := in.place(p); err != nil {
 			return nil, err
 		}
+	}
+	if err := in.dropObsolete(); err != nil {
+		return nil, err
 	}
 	return parts, in.cleanStaging()
 }

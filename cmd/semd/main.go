@@ -44,7 +44,7 @@ func run() error {
 	socket := flag.String("socket", "", "API socket path (default <state>/semd.sock)")
 	embedder := flag.String("embedder", "sidecar", "embedder: sidecar | fake (testing only: bag-of-words, not semantic)")
 	sidecarPath := flag.String("sidecar", "", "semd-embed executable (default: next to semd)")
-	modelDir := flag.String("model", "", "model directory holding text-q8/ (and vision-q8/, audio-bf16/) (default: the app bundle's Resources/models, else <state>/models)")
+	modelDir := flag.String("model", "", "model directory holding litert/ (default: the app bundle's Resources/models, else <state>/models)")
 	nice := flag.Int("nice", 10, "scheduling niceness for the daemon")
 	watchFS := flag.Bool("watch", true, "follow file changes with FSEvents (false: full scan at every start)")
 	powerPolicy := flag.Bool("power-policy", true, "pause indexing on battery, in Low Power Mode, or when hot")
@@ -187,6 +187,12 @@ func startSidecar(path, model, state string, log *slog.Logger) (*embed.Sidecar, 
 	if model, err = filepath.Abs(model); err != nil {
 		return nil, err
 	}
+	// Compiled GPU programs (~300 MB): a start takes under a second with
+	// them, several without.
+	cache, err := filepath.Abs(filepath.Join(state, "cache", "litert"))
+	if err != nil {
+		return nil, err
+	}
 	have, err := mdl.Installed(model)
 	if err != nil {
 		return nil, fmt.Errorf("%w: open Kim Quy to download it again", err)
@@ -202,7 +208,7 @@ func startSidecar(path, model, state string, log *slog.Logger) (*embed.Sidecar, 
 	defer cancel()
 	return embed.StartSidecar(ctx, embed.SidecarConfig{
 		Path:   path,
-		Args:   []string{"--model", model, "--dims", strconv.Itoa(engine.StoreDim)},
+		Args:   []string{"--model", model, "--cache", cache, "--dims", strconv.Itoa(engine.StoreDim)},
 		Logger: log,
 	})
 }

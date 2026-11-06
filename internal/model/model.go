@@ -1,12 +1,11 @@
-// Package model knows the embedding model semd runs: EmbeddingGemma 2 in
-// the layout of the EmbeddingGemma2Swift runtime, pinned to one revision of
-// its Hugging Face repository. It finds the model, checks it, downloads it,
-// and imports a copy the user already has.
+// Package model knows the embedding model semd runs: EmbeddingGemma 2 as a
+// LiteRT-LM file, pinned to one revision of its Hugging Face repository. It
+// finds the model, checks it, downloads it, and imports a copy the user
+// already has.
 //
-// A model directory holds one folder per part (text-q8, vision-q8,
-// audio-bf16). semd-embed takes a part to be there when its manifest.json
-// is, so a part only ever appears whole: it is assembled in a staging
-// folder, verified, and renamed into place.
+// A model directory holds one folder per part (litert). A part only ever
+// appears whole: it is assembled in a staging folder, verified, and renamed
+// into place.
 package model
 
 import (
@@ -23,9 +22,10 @@ import (
 const (
 	// Repo is the Hugging Face repository of the weights, and Revision the
 	// commit the files below come from.
-	Repo     = "Nurymanau/EmbeddingGemma-2-MLX-Swift"
-	Revision = "06b4e075e6b3772e3c29df9f2a2ace7bd4950bdd"
-	// BaseURL is where a part's files are downloaded from: BaseURL/<part>/<file>.
+	Repo     = "litert-community/embeddinggemma-2-740m-litert-lm"
+	Revision = "94408f31843f8bd0adb11c262292627287f5fda4"
+	// BaseURL is where a part's files are downloaded from:
+	// BaseURL/[<remote>/]<file>.
 	BaseURL = "https://huggingface.co/" + Repo + "/resolve/" + Revision
 	// License is the weights' license (Google's original checkpoint and
 	// this conversion alike).
@@ -42,6 +42,7 @@ type File struct {
 // Part is a folder of the model: one tower of it.
 type Part struct {
 	Dir      string // its folder in a model directory
+	Remote   string // its folder in Repo; "" for the root
 	Label    string // what it is for, for people
 	Required bool   // semd does not start without it
 	Files    []File
@@ -56,31 +57,19 @@ func (p Part) Size() int64 {
 	return n
 }
 
-// Parts are the model's parts, text first. The sizes and hashes are those
-// of Revision; semd-embed derives the model id from the manifests', so any
-// other weights would make a different index.
+// Parts are the model's parts, the required one first. The sizes and
+// hashes are those of Revision; semd-embed (embedder/Sources/semd-embed/
+// Engine.swift) pins the same file and derives the model id from its hash,
+// so other weights would make a different index.
 var Parts = []Part{
-	{Dir: "text-q8", Label: "Text and documents", Required: true, Files: []File{
-		{"config.json", 2359, "e090bf087c627155c55b481fca9d216461bdaf44d5a980e018ed3deb92fc7664"},
-		{"config_sentence_transformers.json", 1565, "031e56a498d33c349ab489a21885bcfe25b4fcba841149dc99e1e90d4a7c28f5"},
-		{"quantization.json", 16288, "9de7e788a89f36a07387c9758dd187b596675bfe9e0dbf9e56c3a09f1f410965"},
-		{"tokenizer.json", 32170510, "4d777ef5bdc1aa36227abdfb77c3e49e7b9c892d16e1b6bda41c393504828be4"},
-		{"tokenizer_config.json", 1599, "17bd5d6e9364ca49a534e1502076593317c298d4a663623091ed45388f004874"},
-		{"model.safetensors", 288118885, "eb8a067456a3cff750bebadc7b985420444e673508a2da5bcf56e726e52d62c9"},
-		{"manifest.json", 379, "d9cdb30351293694b7343078970c72b3696eb12034ff06bff2af663fdc3c5cd8"},
-	}},
-	{Dir: "vision-q8", Label: "Images, PDFs and video frames", Files: []File{
-		{"config.json", 3453, "6ece510cf4df3d5370011ea0e856486f971dbd8019f5587c6a059977d61571d4"},
-		{"quantization.json", 11258, "19c4f4d59a942f0829b4c5b6d8da12e24c5a5306434a22f0705e10ff2ced1186"},
-		{"vision.safetensors", 193095171, "9b18ee38272989696737fe3a0c4302dfa06f47cc37192b1b8f7583f8447da173"},
-		{"manifest.json", 380, "db92014f981b36cde052bc4759929d343d30b22f7888c623375b50427ffa11a4"},
-	}},
-	{Dir: "audio-bf16", Label: "Audio and the sound of videos", Files: []File{
-		{"config.json", 3361, "500326bb2a9b4372db5fa505298f046cff27a5f4961c02102a5f8bccdebe6eac"},
-		{"audio.safetensors", 611314600, "a163c6dc2e47cb894a02fb7f8e6e4d7cc4edbd81a80a8506438fd42610a526e3"},
-		{"manifest.json", 196, "39cb724fbd90a0b1b99ea64a643556e73fd18444f4b01a9b9fb835fdabd3ca5e"},
+	{Dir: "litert", Label: "Text, documents, images, audio and video", Required: true, Files: []File{
+		{"embeddinggemma-2-740m.litertlm", 484622336, "e7a8a2204b91e0f96e92960e84a09a89212e1633dcb7575a9bf3378b4df77f4c"},
 	}},
 }
+
+// Obsolete are the part folders of earlier models (the MLX runtime's). The
+// installer deletes them from its own directory once Parts are in.
+var Obsolete = []string{"text-q8", "vision-q8", "audio-bf16"}
 
 // PartByDir returns the part in folder dir.
 func PartByDir(dir string) (Part, bool) {
